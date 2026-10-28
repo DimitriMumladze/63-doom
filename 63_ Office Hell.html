@@ -13,6 +13,9 @@
   #settings { position: fixed; top: 12px; right: 12px; z-index: 10; display: flex; flex-direction: column;
     align-items: flex-end; gap: 8px; }
   body.playing #settings { opacity: 0.35; transition: opacity 0.3s; }
+  /* playing with a controller (Xbox): no cursor and no settings gear over the game */
+  body.pad canvas { cursor: none; }
+  body.pad.playing #settings { opacity: 0; pointer-events: none; }
   body.playing #settings:hover { opacity: 1; }
   #gearBtn {
     width: 40px; height: 40px; border-radius: 10px; border: 1px solid rgba(68, 218, 157, 0.55); cursor: pointer;
@@ -1488,11 +1491,11 @@ const Game = {
   updatePlayer(dt) {
     const p = this.player;
     if (p.dead) return;
-    const k = Input.keys;
+    const k = Input.keys, pad = Input.pad;
     const turn = (k.ArrowRight ? 1 : 0) - (k.ArrowLeft ? 1 : 0);
     const [mdx, mdy] = Input.takeMouse();
-    p.a += turn * 2.4 * dt + mdx * 0.0011 * Settings.sens;
-    p.pitch = Math.max(-100, Math.min(100, p.pitch - mdy * 0.5 * Settings.sens));
+    p.a += turn * 2.4 * dt + mdx * 0.0011 * Settings.sens + pad.rx * 3.2 * dt * Settings.sens;
+    p.pitch = Math.max(-100, Math.min(100, p.pitch - mdy * 0.5 * Settings.sens - pad.ry * 160 * dt * Settings.sens));
     // jump (Space) and crouch (hold C)
     if (Input.pressed('Space') && p.z <= 0 && p.crouch < 0.5) { p.vz = 3.4; Sound.play('jump'); }
     if (p.z > 0 || p.vz > 0) {
@@ -1503,21 +1506,23 @@ const Game = {
         p.z = 0; p.vz = 0;
       }
     }
-    const crouchTarget = k.KeyC ? 1 : 0;
+    const crouchTarget = k.KeyC || pad.crouch ? 1 : 0;
     p.crouch += (crouchTarget - p.crouch) * Math.min(1, dt * 12);
     p.land = Math.max(0, p.land - dt * 5);
     p.kick = Math.max(0, p.kick - dt * 60);
-    const fwd = ((k.KeyW || k.ArrowUp) ? 1 : 0) - ((k.KeyS || k.ArrowDown) ? 1 : 0);
-    const str = (k.KeyD ? 1 : 0) - (k.KeyA ? 1 : 0);
-    const speed = (k.ShiftLeft || k.ShiftRight ? 5.2 : 3.6) * (1 - 0.5 * p.crouch) * dt;
+    // the left stick is analog: a half-pushed stick walks at half speed
+    const fwd = ((k.KeyW || k.ArrowUp) ? 1 : 0) - ((k.KeyS || k.ArrowDown) ? 1 : 0) - pad.ly;
+    const str = (k.KeyD ? 1 : 0) - (k.KeyA ? 1 : 0) + pad.lx;
+    const speed = (k.ShiftLeft || k.ShiftRight || pad.run ? 5.2 : 3.6) * (1 - 0.5 * p.crouch) * dt;
     const ca = Math.cos(p.a), sa = Math.sin(p.a);
     let mx = (ca * fwd - sa * str), my = (sa * fwd + ca * str);
     const ml = Math.hypot(mx, my);
     p.moving = ml > 0;
     if (ml > 0) {
-      mx = mx / ml * speed; my = my / ml * speed;
+      const s = Math.min(1, ml);
+      mx = mx / ml * s * speed; my = my / ml * s * speed;
       this.move(p, mx, my);
-      p.bob += dt * 9;
+      p.bob += dt * 9 * s;
     }
     // push out of enemies
     for (const e of this.enemies) {
@@ -2080,7 +2085,8 @@ const Hud = {
     g.drawImage(logo, VW / 2 - 40, 14, 80, 80);
     this.text(g, 'OFFICE HELL', VW / 2, 100, 30, RED, 'center');
     this.text(g, 'Your coworkers have gone wrong.', VW / 2, 134, 10, '#ddd', 'center');
-    if (Math.floor(t * 2) % 2 === 0) this.text(g, 'CLICK TO START', VW / 2, 150, 14, MINT, 'center');
+    const pad = Input.usingPad;
+    if (Math.floor(t * 2) % 2 === 0) this.text(g, pad ? 'PRESS A TO START' : 'CLICK TO START', VW / 2, 150, 14, MINT, 'center');
     // the crew
     const crew = ['brute', 'tank', 'irakli', 'rider', 'beard', 'sandro'];
     crew.forEach((id, i) => {
@@ -2092,10 +2098,17 @@ const Hud = {
       const words = ENEMY_TYPES[id].name.length > 12 ? ENEMY_TYPES[id].name.split(' ') : [ENEMY_TYPES[id].name];
       words.forEach((w, k) => this.text(g, w, x + 16, 208 + k * 9, 8, ENEMY_TYPES[id].boss ? RED : '#ccc', 'center'));
     });
-    this.text(g, 'WASD move · mouse look · click fire · Space jump · C crouch · E doors',
-      VW / 2, 244, 8, '#aaa', 'center');
-    this.text(g, 'Shift run · 1-7 / wheel weapons · M music · Esc pause',
-      VW / 2, 256, 8, '#aaa', 'center');
+    if (pad) {
+      this.text(g, 'L-stick move · R-stick look · RT fire · A jump · B crouch · X doors',
+        VW / 2, 244, 8, '#aaa', 'center');
+      this.text(g, 'LT run · LB / RB weapons · VIEW music · MENU pause',
+        VW / 2, 256, 8, '#aaa', 'center');
+    } else {
+      this.text(g, 'WASD move · mouse look · click fire · Space jump · C crouch · E doors',
+        VW / 2, 244, 8, '#aaa', 'center');
+      this.text(g, 'Shift run · 1-7 / wheel weapons · M music · Esc pause',
+        VW / 2, 256, 8, '#aaa', 'center');
+    }
   },
 
   drawDead(g, t) {
@@ -2106,7 +2119,9 @@ const Hud = {
       g.drawImage(Assets.get(by.type + '/face').img, VW / 2 - 24, 108, 48, 48);
       this.text(g, `${by.t.name} got you.`, VW / 2, 160, 12, '#f4e7c0', 'center');
     }
-    if (t > 1 && Math.floor(t * 2) % 2 === 0) this.text(g, 'CLICK TO TRY AGAIN', VW / 2, 182, 12, MINT, 'center');
+    if (t > 1 && Math.floor(t * 2) % 2 === 0) {
+      this.text(g, Input.usingPad ? 'PRESS A TO TRY AGAIN' : 'CLICK TO TRY AGAIN', VW / 2, 182, 12, MINT, 'center');
+    }
   },
 
   // a banner just above the status bar; the office stays visible and playable
@@ -2117,13 +2132,13 @@ const Hud = {
     g.drawImage(Assets.get('item/logo63').img, 6, y + 4, 32, 32);
     this.text(g, 'YOU SURVIVED THE 63 OFFICE', 44, y + 5, 14, MINT);
     this.text(g, `Kills ${stats.kills}/${stats.total}   Time ${stats.time}`, 44, y + 24, 10, '#f4e7c0');
-    if (Math.floor(t * 2) % 2 === 0) this.text(g, 'R  RESTART', VW - 8, y + 24, 10, MINT, 'right');
+    if (Math.floor(t * 2) % 2 === 0) this.text(g, Input.usingPad ? 'VIEW  RESTART' : 'R  RESTART', VW - 8, y + 24, 10, MINT, 'right');
   },
 
   drawPaused(g) {
     this.overlay(g, 0.5);
     this.text(g, 'PAUSED', VW / 2, 90, 26, '#fff', 'center');
-    this.text(g, 'Click to resume', VW / 2, 124, 12, MINT, 'center');
+    this.text(g, Input.usingPad ? 'Press A to resume' : 'Click to resume', VW / 2, 124, 12, MINT, 'center');
   },
 
   drawLoading(g, done, total) {
@@ -2144,16 +2159,22 @@ const Hud = {
 
 const Input = {
   keys: {}, down: {}, mouseDX: 0, mouseDY: 0, lastDX: 0, wheel: 0, mouseFire: false, locked: false,
+  // controller (standard mapping, e.g. an Xbox pad in Edge on Xbox), polled once per frame
+  pad: { lx: 0, ly: 0, rx: 0, ry: 0, fire: false, run: false, crouch: false },
+  padPrev: [], usingPad: false,
 
   init(canvas) {
+    // old Edge on Xbox drives a mouse cursor with the pad unless the page asks for raw gamepad input
+    try { navigator.gamepadInputEmulation = 'gamepad'; } catch (e) { /* not Xbox */ }
     window.addEventListener('keydown', e => {
+      this.setUsingPad(false);
       if (!this.keys[e.code]) this.down[e.code] = true;
       this.keys[e.code] = true;
       if (['Space', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(e.code)) e.preventDefault();
       if (e.code === 'KeyM' && !e.repeat) SideBar.toggleMusic();
     });
     window.addEventListener('keyup', e => { this.keys[e.code] = false; });
-    window.addEventListener('blur', () => { this.keys = {}; this.mouseFire = false; });
+    window.addEventListener('blur', () => { this.keys = {}; this.mouseFire = false; this.clearPad(); });
     canvas.addEventListener('mousedown', e => { if (e.button === 0) this.mouseFire = true; });
     window.addEventListener('mouseup', e => { if (e.button === 0) this.mouseFire = false; });
     window.addEventListener('mousemove', e => {
@@ -2166,6 +2187,63 @@ const Input = {
     });
   },
   pressed(code) { const v = !!this.down[code]; this.down[code] = false; return v; },
+
+  setUsingPad(v) {
+    if (this.usingPad === v) return;
+    this.usingPad = v;
+    document.body.classList.toggle('pad', v);
+  },
+
+  clearPad() {
+    const s = this.pad;
+    s.lx = s.ly = s.rx = s.ry = 0;
+    s.fire = s.run = s.crouch = false;
+  },
+
+  // radial deadzone with a squared response curve, so small stick moves aim finely
+  stick(x, y, dead) {
+    const m = Math.hypot(x, y);
+    if (m < dead) return 0;
+    const k = Math.min(1, (m - dead) / (1 - dead));
+    return k * k / m;
+  },
+
+  pollPad() {
+    const pads = navigator.getGamepads ? navigator.getGamepads() : null;
+    let gp = null;
+    if (pads) for (let i = 0; i < pads.length; i++) if (pads[i] && pads[i].connected) { gp = pads[i]; break; }
+    if (!gp) { this.clearPad(); return; }
+    const s = this.pad, b = gp.buttons, ax = gp.axes;
+    const held = i => !!b[i] && (b[i].pressed || b[i].value > 0.4);
+    const fl = this.stick(ax[0] || 0, ax[1] || 0, 0.18);
+    const fr = this.stick(ax[2] || 0, ax[3] || 0, 0.15);
+    s.lx = (ax[0] || 0) * fl; s.ly = (ax[1] || 0) * fl;
+    s.rx = (ax[2] || 0) * fr; s.ry = (ax[3] || 0) * fr;
+    s.fire = held(7);                  // RT
+    s.run = held(6) || held(10);       // LT or left stick click
+    s.crouch = held(1);                // B
+    let active = fl > 0 || fr > 0;
+    for (let i = 0; i < b.length && i < 17; i++) {
+      const now = held(i);
+      if (now) active = true;
+      if (now && !this.padPrev[i]) this.padPress(i);
+      this.padPrev[i] = now;
+    }
+    if (active) this.setUsingPad(true);
+  },
+
+  // button presses become the same "pressed" events the keyboard makes; Pad0 / Pad9 drive the menus
+  padPress(i) {
+    Sound.init();
+    if (Sound.ctx && Sound.ctx.state === 'suspended') Sound.ctx.resume().catch(() => {});
+    this.down['Pad' + i] = true;
+    if (i === 0) this.down.Space = true;                     // A     jump
+    else if (i === 2) this.down.KeyE = true;                 // X     doors
+    else if (i === 3 || i === 5 || i === 12) this.wheel++;   // Y, RB, d-pad up: next weapon
+    else if (i === 4 || i === 13) this.wheel--;              // LB, d-pad down: previous weapon
+    else if (i === 8 && Main.state !== 'win') SideBar.toggleMusic();  // View (restarts once won)
+    else if (i === 11) Main.showFps = !Main.showFps;         // right stick click
+  },
   takeMouse() {
     const v = [this.mouseDX, this.mouseDY];
     this.lastDX = this.mouseDX;
@@ -2173,7 +2251,7 @@ const Input = {
     return v;
   },
   takeWheel() { const v = this.wheel; this.wheel = 0; return v; },
-  fireHeld() { return this.mouseFire || this.keys.ControlLeft || this.keys.ControlRight; },
+  fireHeld() { return this.mouseFire || this.keys.ControlLeft || this.keys.ControlRight || this.pad.fire; },
   endFrame() { this.down = {}; },
 };
 
@@ -2195,6 +2273,20 @@ const Main = {
     Game.start();
     this.setState('title');
     canvas.addEventListener('click', () => this.onClick());
+    // Xbox guide / home button or a tab switch: pause, so nothing is held down and no huge dt on return
+    document.addEventListener('visibilitychange', () => {
+      if (!document.hidden) return;
+      Input.keys = {}; Input.mouseFire = false; Input.clearPad();
+      if (this.state === 'play') this.setState('paused');
+    });
+    // B is "back" in the Xbox browser; keep one history entry in hand so it pauses instead of leaving
+    try {
+      history.pushState({ game: 1 }, '');
+      window.addEventListener('popstate', () => {
+        history.pushState({ game: 1 }, '');
+        if (this.state === 'play') this.setState('paused');
+      });
+    } catch (e) { /* file:// in some browsers */ }
     document.getElementById('restartBtn').addEventListener('click', e => { e.currentTarget.blur(); Sound.init(); this.restart(); });
     requestAnimationFrame(t => this.loop(t));
   },
@@ -2225,9 +2317,17 @@ const Main = {
   onClick() {
     Sound.init();
     SideBar.apply();
+    if (this.state === 'title' || this.state === 'paused' || this.state === 'dead') this.advance();
+    else if ((this.state === 'play' || this.state === 'win') && !Input.locked) this.lock();
+  },
+
+  // title -> play, paused -> play, dead -> restart; from a mouse click or the A / Menu buttons
+  advance() {
+    SideBar.apply();
     if (this.state === 'title') {
       Game.start();
       Sound.play('start');
+      this.fullscreen();
       this.lock();
       this.setState('play');
     } else if (this.state === 'paused') {
@@ -2235,9 +2335,17 @@ const Main = {
       this.setState('play');
     } else if (this.state === 'dead' && this.stateT > 1) {
       this.restart();
-    } else if ((this.state === 'play' || this.state === 'win') && !Input.locked) {
-      this.lock();
     }
+    Input.down = {};      // the A press that started the game must not also jump
+  },
+
+  // on a TV the browser bar wastes space; only worth it when playing with a controller
+  fullscreen() {
+    if (!Input.usingPad || document.fullscreenElement) return;
+    try {
+      const r = document.documentElement.requestFullscreen && document.documentElement.requestFullscreen();
+      if (r && r.catch) r.catch(() => {});
+    } catch (e) { /* not allowed without a gesture */ }
   },
 
   restart() {
@@ -2260,8 +2368,13 @@ const Main = {
     this.stateT += dt;
     this.fpsAcc += dt; this.fpsN++;
     if (this.fpsAcc > 0.5) { this.fps = Math.round(this.fpsN / this.fpsAcc); this.fpsAcc = 0; this.fpsN = 0; }
+    Input.pollPad();
     if (Input.pressed('F3')) this.showFps = !this.showFps;
-    if (this.state === 'win' && Input.pressed('KeyR')) this.restart();
+    if (this.state === 'win' && (Input.pressed('KeyR') || Input.pressed('Pad8'))) this.restart();
+    if (Input.pressed('Pad9')) {                       // Menu: pause / resume / start
+      if (this.state === 'play') this.setState('paused');
+      else this.advance();
+    } else if (this.state !== 'play' && this.state !== 'win' && Input.pressed('Pad0')) this.advance();
 
     const g = this.g, p = Game.player;
     if (this.state === 'play' || this.state === 'dead' || this.state === 'win') {
