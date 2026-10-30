@@ -1,0 +1,93 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>63: Office Hell</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #000; overflow: hidden; }
+  body { display: flex; align-items: center; justify-content: center; font-family: system-ui, sans-serif; }
+  canvas { image-rendering: pixelated; image-rendering: crisp-edges; cursor: crosshair; display: block; }
+
+  /* settings: a gear in the top-right corner that drops down the controls */
+  #settings { position: fixed; top: 12px; right: 12px; z-index: 10; display: flex; flex-direction: column;
+    align-items: flex-end; gap: 8px; }
+  body.playing #settings { opacity: 0.35; transition: opacity 0.3s; }
+  body.playing #settings:hover { opacity: 1; }
+  #gearBtn {
+    width: 40px; height: 40px; border-radius: 10px; border: 1px solid rgba(68, 218, 157, 0.55); cursor: pointer;
+    background: rgba(24, 22, 40, 0.82); color: #44da9d; display: grid; place-items: center; padding: 0;
+  }
+  #gearBtn:hover { background: #383892; }
+  #gearBtn svg { transition: transform 0.3s; }
+  #settings.open #gearBtn svg { transform: rotate(60deg); }
+  #sidebar {
+    display: none; flex-direction: column; align-items: center; gap: 10px;
+    padding: 12px 8px; border-radius: 14px;
+    background: rgba(24, 22, 40, 0.92); border: 1px solid rgba(68, 218, 157, 0.55);
+    box-shadow: 0 4px 18px rgba(0, 0, 0, 0.5); color: #44da9d;
+  }
+  #settings.open #sidebar { display: flex; }
+  #sidebar button {
+    width: 40px; height: 40px; border-radius: 10px; border: 0; cursor: pointer;
+    background: #383892; color: #44da9d; display: grid; place-items: center; padding: 0;
+  }
+  #sidebar button:hover { background: #4a4ab8; }
+  #sidebar button .off { display: none; }
+  #sidebar button.muted { background: #3a2a30; color: #e63c32; }
+  #sidebar button.muted .on { display: none; }
+  #sidebar button.muted .off { display: block; }
+  #sidebar input[type=range] {
+    writing-mode: vertical-lr; direction: rtl; width: 22px; height: 110px;
+    accent-color: #44da9d; cursor: pointer; margin: 0;
+  }
+  #sidebar .sep { width: 28px; height: 1px; background: rgba(68, 218, 157, 0.35); }
+  #sidebar .label { font-size: 10px; letter-spacing: 0.05em; color: #b9b6d8; text-align: center; }
+</style>
+</head>
+<body>
+<canvas id="screen" width="480" height="270"></canvas>
+
+<div id="settings">
+<button id="gearBtn" title="Settings" aria-label="Settings" aria-expanded="false" aria-controls="sidebar">
+  <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+       stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+    <circle cx="12" cy="12" r="3"/>
+    <path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/>
+  </svg>
+</button>
+<div id="sidebar" aria-label="Game settings">
+  <button id="musicBtn" title="Music on (M)" aria-label="Toggle music">
+    <svg class="on" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+         stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+      <path d="M11 5 6 9H2v6h4l5 4V5z" fill="currentColor"/>
+      <path d="M15.5 8.5a5 5 0 0 1 0 7"/><path d="M19 5a10 10 0 0 1 0 14"/>
+    </svg>
+    <svg class="off" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+         stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+      <path d="M11 5 6 9H2v6h4l5 4V5z" fill="currentColor"/>
+      <path d="m23 9-6 6"/><path d="m17 9 6 6"/>
+    </svg>
+  </button>
+  <input id="musicVol" type="range" min="0" max="100" value="60" title="Music volume" aria-label="Music volume">
+  <div class="label">MUSIC</div>
+  <div class="sep"></div>
+  <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+       stroke-linecap="round" aria-hidden="true">
+    <circle cx="12" cy="12" r="7"/><path d="M12 2v5M12 17v5M2 12h5M17 12h5"/>
+  </svg>
+  <input id="sens" type="range" min="30" max="200" value="100" title="Mouse sensitivity" aria-label="Mouse sensitivity">
+  <div class="label">MOUSE<br><span id="sensVal">1.0x</span></div>
+</div>
+</div>
+
+<script src="js/assets.js"></script>
+<script src="js/engine.js"></script>
+<script src="js/level.js"></script>
+<script src="js/audio.js"></script>
+<script src="js/settings.js"></script>
+<script src="js/game.js"></script>
+<script src="js/hud.js"></script>
+<script src="js/main.js"></script>
+</body>
+</html>

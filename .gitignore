@@ -1,0 +1,10 @@
+dist/
+__pycache__/
+*.pyc
+
+# Local editor/agent settings
+.claude/
+
+# Full-res source photographs of the crew. Not build inputs (tools/bundle.py never
+# reads this folder) and this repo is public, so they stay on the artists' machines.
+assets/source/
