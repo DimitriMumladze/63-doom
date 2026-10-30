@@ -14,8 +14,14 @@ const ROOT = path.resolve(__dirname, '..');
 const collide = require(path.join(ROOT, 'game/js/collide.js'));
 const { WEAPONS } = require(path.join(ROOT, 'game/js/weapons.js'));
 Object.assign(global, collide);
-const { YARD_MAP_SPEC } = require(path.join(ROOT, 'game/js/maps/yard.js'));
-const C = collide.buildCollision(YARD_MAP_SPEC);
+// whichever map the server is on (MAP=yard for the small one), since the bots walk
+// its collision grid for real
+Object.assign(global, require(path.join(ROOT, 'game/js/maps/office.js')));
+const MAPNAME = process.env.MAP === 'yard' ? 'yard' : 'block';
+const SPEC = MAPNAME === 'yard'
+  ? require(path.join(ROOT, 'game/js/maps/yard.js')).YARD_MAP_SPEC
+  : require(path.join(ROOT, 'game/js/maps/block.js')).BLOCK_MAP_SPEC;
+const C = collide.buildCollision(SPEC);
 
 const args = process.argv.slice(2);
 const N = Math.max(1, Math.min(15, Number(args.find(a => /^\d+$/.test(a))) || 15));
@@ -177,7 +183,7 @@ class Bot {
 
 const r2 = v => Math.round(v * 100) / 100;
 
-console.log(`${N} bots -> ws://${HOST}/ws`);
+console.log(`${N} bots -> ws://${HOST}/ws  (map "${MAPNAME}", ${C.w}x${C.h})`);
 for (let i = 0; i < N; i++) setTimeout(() => bots.push(new Bot(i)), i * 60);
 
 const started = Date.now();

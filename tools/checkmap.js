@@ -11,10 +11,11 @@ const vm = require('vm');
 const ROOT = path.resolve(__dirname, '..');
 const JS = path.join(ROOT, 'game', 'js');
 
+// `needs`: other map files this one builds on (block.js stamps the office in)
 const MAPS = {
   yard: { file: 'maps/yard.js', spec: 'YARD_MAP_SPEC' },
   office: { file: 'maps/office.js', spec: 'OFFICE_MAP' },
-  block: { file: 'maps/block.js', spec: 'BLOCK_MAP_SPEC' },
+  block: { file: 'maps/block.js', spec: 'BLOCK_MAP_SPEC', needs: ['maps/office.js'] },
 };
 
 const which = process.argv[2] && !process.argv[2].startsWith('--') ? process.argv[2] : 'yard';
@@ -26,7 +27,7 @@ if (!fs.existsSync(path.join(JS, m.file))) { console.error(`${m.file} does not e
 // A map file is data; it needs collide.js for the grid helpers and nothing else.
 const ctx = vm.createContext({ console, Math, Object, Array, String, Number, JSON,
   Uint8Array, Int16Array, Float32Array, module: undefined });
-for (const f of ['collide.js', m.file]) {
+for (const f of ['collide.js', ...(m.needs || []), m.file]) {
   vm.runInContext(fs.readFileSync(path.join(JS, f), 'utf8'), ctx, { filename: f });
 }
 const spec = vm.runInContext(m.spec, ctx);

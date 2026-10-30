@@ -90,7 +90,7 @@ const ctx = vm.createContext(sandbox);
 vm.runInContext('var Assets = { img: {}, get: () => TEX };', ctx);
 ctx.TEX = TEX;
 for (const f of ['collide.js', 'weapons.js', 'engine.js', 'level.js', 'maps/office.js',
-  'maps/yard.js', 'mode.js', 'settings.js', 'game.js', 'net.js', 'hud.js']) {
+  'maps/yard.js', 'maps/block.js', 'mode.js', 'settings.js', 'game.js', 'net.js', 'hud.js']) {
   try {
     vm.runInContext(fs.readFileSync(path.join(JS, f), 'utf8'), ctx, { filename: f });
   } catch (e) {

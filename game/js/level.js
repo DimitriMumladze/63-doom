@@ -106,8 +106,11 @@ const LIGHTING = {
   fogNear: 0,           // where fog starts; 0 with fogFar 0 means none at all
   fogFar: 0,
   fogMax: 1,            // how completely the far distance turns to fog
-  fogSky: [116, 104, 126],    // out of doors: the dusk haze the sky panorama sits in
-  fogDark: [14, 13, 18],      // indoors: it just goes dark
+  // Out of doors, distance fades into the sky's own horizon, measured off the bottom
+  // of assets/textures/sky_dusk.png -- so a far wall and the sky behind it meet at the
+  // same colour instead of at a seam. Indoors it just goes dark.
+  fogSky: [46, 57, 48],
+  fogDark: [12, 12, 16]
 };
 
 function buildLevel(spec) {

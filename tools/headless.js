@@ -24,7 +24,7 @@ const secAt = args.indexOf('--seconds');
 const SECONDS = secAt >= 0 ? Number(args[secAt + 1]) : 240;
 
 const MODULES = ['assets.js', 'collide.js', 'weapons.js', 'engine.js', 'level.js',
-  'maps/office.js', 'maps/yard.js', 'mode.js', 'game.js', 'net.js'];
+  'maps/office.js', 'maps/yard.js', 'maps/block.js', 'mode.js', 'game.js', 'net.js'];
 
 const problems = [];
 const seenProblem = new Set();

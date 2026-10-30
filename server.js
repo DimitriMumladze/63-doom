@@ -40,13 +40,20 @@ try {
   // and collide.js's grid helpers are simply there. Put them where it expects them
   // rather than making the map files carry Node plumbing around.
   Object.assign(global, collide);
-  const map = require('./game/js/maps/yard.js');
-  Rules = { ...collide, ...weapons, spec: map.YARD_MAP_SPEC };
+  // the block is the real map; MAP=yard gives the small one the netcode was built
+  // against, where a test match takes a minute instead of five
+  const want = process.env.MAP === 'yard' ? 'yard' : 'block';
+  Object.assign(global, require('./game/js/maps/office.js'));   // the block stamps it in
+  const maps = {
+    block: () => require('./game/js/maps/block.js').BLOCK_MAP_SPEC,
+    yard: () => require('./game/js/maps/yard.js').YARD_MAP_SPEC,
+  };
+  Rules = { ...collide, ...weapons, spec: maps[want](), map: want };
   Rules.C = Rules.buildCollision(Rules.spec);
   Rules.wnames = Object.keys(Rules.WEAPONS);
 } catch (e) {
   console.log('battle royale off: ' + e.message);
-  console.log('  (it needs game/js/collide.js, game/js/weapons.js and game/js/maps/yard.js next to this file)');
+  console.log('  (it needs game/js/collide.js, game/js/weapons.js and game/js/maps/ next to this file)');
 }
 
 // ----------------------------------------------------------------------
@@ -200,6 +207,13 @@ function send(c, m) { if (!c.sock.destroyed) c.sock.write(frame(Buffer.from(JSON
 // ----------------------------------------------------------------------
 const HZ = 20;
 const PLAYER_R = 0.24;
+// Positions come over the wire rounded to two decimals (see r2 in net.js), which can
+// move a point up to 0.005 of a cell. A player pressed against a wall -- which in a
+// shooter is most of the time -- is exactly at the limit, so rounding alone would put
+// them a hair inside it and the server would snap them back for no reason. Testing
+// with a slightly smaller circle absorbs that: it was 0.05% of positions, and a
+// player hugging a corner hit it constantly.
+const CHECK_R = PLAYER_R - 0.01;
 const RUN_SPEED = 5.2;             // see Game.updatePlayer; the fastest anyone can legitimately go
 const DROP_FREEZE = 2.5;           // seconds of "the lift doors open": can't move, can't be shot
 const COUNTDOWN = 20;
@@ -233,7 +247,8 @@ const START_KIT = { weapon: 'shotgun', has: ['pistol', 'shotgun'],
 const BR = {
   MAX: 15, MIN: 2,
   state: 'lobby', t: 0, tick: 0, match: 0, seed: 1, started: 0,
-  sent: 0, tickMs: 0, tickPeak: 0, reportT: 0,
+  sent: 0, tickMs: 0, tickPeak: 0, reportT: 0, phaseMs: [], cpuAt: null,
+  fixes: { fast: 0, wall: 0 },
   players: new Map(),              // id -> player record (its .conn is the socket)
   ring: null,                      // see startRing()
   ringT: 0,
@@ -256,7 +271,8 @@ const BR = {
       hist: [], lastShot: {}, at: Date.now(), rtt: 0, qAt: 0, spec: 0, late: false,
     };
     this.players.set(p.id, p);
-    send(c, { t: 'welcome', id: p.id, slot: p.slot, mode: 'br', max: this.MAX, name: p.name, skin: p.skin });
+    send(c, { t: 'welcome', id: p.id, slot: p.slot, mode: 'br', max: this.MAX, name: p.name,
+      skin: p.skin, map: Rules.map });
     // mid-match arrivals watch until the next one
     if (this.state === 'live' || this.state === 'over') {
       p.late = true;
@@ -335,7 +351,8 @@ const BR = {
     p.at = now;
     const reach = RUN_SPEED * dt * 1.8 + 0.5;                // generous: bad wifi is not cheating
     const moved = Math.hypot(nx - p.x, ny - p.y);
-    if (moved > reach || !Rules.freeCircle(Rules.C, nx, ny, PLAYER_R)) { this.correct(p); return; }
+    if (moved > reach) { this.fixes.fast++; this.correct(p); return; }
+    if (!Rules.freeCircle(Rules.C, nx, ny, CHECK_R)) { this.fixes.wall++; this.correct(p); return; }
     p.x = nx; p.y = ny;
     p.hist.push([now, nx, ny]);
     while (p.hist.length > 2 && now - p.hist[0][0] > 600) p.hist.shift();
@@ -503,7 +520,7 @@ const BR = {
       if (tx < 1 || ty < 1 || tx > C.w - 1 || ty > C.h - 1) continue;
       // the middle of the last circle has to be somewhere you can stand, or the
       // final few seconds are spent inside a wall
-      if (tr > 1.5 || Rules.freeCircle(C, tx, ty, 0.4)) return { tx, ty, tr, next };
+      if (tr > 1.5 || Rules.freeCircle(C, tx, ty, 0.4)) return { tx, ty, tr, next };   // somewhere you can stand
     }
     return { tx: g.cx, ty: g.cy, tr, next };
   },
@@ -596,16 +613,35 @@ const BR = {
     const ms = Number(process.hrtime.bigint() - t0) / 1e6;
     this.tickMs += ms;
     if (ms > this.tickPeak) this.tickPeak = ms;
+    // A tick this long would be felt. Say what it was doing, and how much of it was
+    // this process rather than waiting on the machine: a tick that took 800 ms of
+    // wall clock and 2 ms of CPU was something else running, not us.
+    if (ms > 25) {
+      const cpu = process.cpuUsage(this.cpuAt || undefined);
+      const used = (cpu.user + cpu.system) / 1000;
+      log(`  slow tick: ${ms.toFixed(0)} ms wall, ${used.toFixed(0)} ms cpu` +
+        `  [${this.phaseMs.map(([n, v]) => n + ' ' + v.toFixed(1)).join(', ')}]`);
+    }
+    this.cpuAt = process.cpuUsage();
     if (this.state === 'live' && this.t - this.reportT >= 15) {
       const secs = this.t - this.reportT || 1;
       log(`  ${this.living().length}/${this.started} alive  |  ` +
         `${(this.sent / secs / 1024).toFixed(1)} KB/s out, ` +
-        `${(this.tickMs / (secs * HZ)).toFixed(2)} ms/tick avg, ${this.tickPeak.toFixed(1)} peak`);
+        `${(this.tickMs / (secs * HZ)).toFixed(2)} ms/tick avg, ${this.tickPeak.toFixed(1)} peak` +
+        (this.fixes.fast || this.fixes.wall
+          ? `, snapped back ${this.fixes.fast} too-fast ${this.fixes.wall} in-a-wall` : ''));
       this.reportT = this.t; this.sent = 0; this.tickMs = 0; this.tickPeak = 0;
+      this.fixes.fast = 0; this.fixes.wall = 0;
     }
   },
 
   tock(dt) {
+    this.phaseMs = [];
+    const mark = (name, fn) => {
+      const a = process.hrtime.bigint();
+      fn();
+      this.phaseMs.push([name, Number(process.hrtime.bigint() - a) / 1e6]);
+    };
     this.t += dt;
     this.tick++;
     const n = this.waiting().length;
@@ -622,7 +658,7 @@ const BR = {
       else if (this.t >= COUNTDOWN) this.startMatch();
     } else if (this.state === 'live') {
       for (const p of this.players.values()) if (p.frozen > 0) p.frozen -= dt;
-      this.stepRing(dt);
+      mark('ring', () => this.stepRing(dt));
       const live = this.living();
       if (live.length <= 1 && this.players.size > 1) this.finish();
       else if (live.length === 0) this.finish();
@@ -634,7 +670,7 @@ const BR = {
       if (this.tick % HZ === 0) this.pushLobby();          // once a second is plenty
       return;
     }
-    this.snapshot();
+    mark('snap', () => this.snapshot());
   },
 
   // One string, written to every socket: fifteen players at 20 Hz is a few hundred

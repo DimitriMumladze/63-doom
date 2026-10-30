@@ -10,7 +10,7 @@ server.js              optional server: co-op relay + battle royale referee (see
 game/                  the source -- index.html + js/*.js
   js/collide.js          level geometry, shared with server.js
   js/weapons.js          the guns, shared with server.js
-  js/maps/               level data: office.js (campaign), yard.js (battle royale)
+  js/maps/               level data: office.js (campaign), block.js + yard.js (battle royale)
   js/mode.js             the two sets of rules, behind Game.mode
 assets/                art, music and the Georgian pixel font, embedded at build time
 tools/                 asset generators, bundle.py, unbundle.py, deploy.sh, the tests
@@ -61,7 +61,8 @@ None of them need a browser, and all of them are plain `node`:
 ```
 node tools/smoke.js        plays the campaign for a simulated minute
 node tools/drawtest.js     draws every screen once against a recording canvas
-node tools/checkmap.js [yard|office] [--ascii]    checks a map spec
+node tools/checkmap.js [block|yard|office] [--ascii]   checks a map spec
+node tools/checkoffice.js  the office inside the block is still the office
 node tools/botclient.js 15                        fills a match with bots
 node tools/headless.js 8                          plays a match with real clients
 ```
@@ -188,3 +189,22 @@ Windows may ask to let Node through the firewall: allow it on private networks.
 - **Dying** is final -- no respawn. You get your placing, and then watch whoever is still
   standing until the match ends. The last one left is employee of the month.
 - Everyone starts with the same shotgun for now; loot is the next thing.
+
+### The map
+
+`maps/block.js`, 96 x 96 -- four times the office across and about five times its
+walkable area. Eight places worth going, strung along one street: the **63 office**
+itself (the campaign's own rows, stamped in, so the building you fight through is the
+building you work in), the **car park**, the **roof**, the **warehouse** with its
+mezzanine, the **kiosks** along the road, the **underpass**, the **loading yard** and
+the **alleys** between them.
+
+Two things the engine decides for us. There is one floor plane and no sectors, so the
+roof and the underpass are not above or below anything -- they are flat places dressed
+to read that way, open sky behind a parapet for one and a low dark tiled ceiling for
+the other. And the office's doors are opened: a sliding door is the one piece of
+geometry the server would have to arbitrate every frame, and a battle royale has no
+use for it.
+
+`MAP=yard node server.js` plays `maps/yard.js` instead, which is the small map the
+netcode was built against. A match on it takes a minute rather than four.

@@ -99,8 +99,9 @@ const YARD_MAP_SPEC = {
   cull: 34,                      // props past this are not worth putting in the sprite list
   defaults: { wall: 'concrete', floor: 'asphalt', ceil: 'ceil_concrete', sky: 'sky_dusk' },
   // you have to be able to see across a yard this size, and tell forty cells from
-  // seventy; the campaign's falloff bottoms out at fifteen
-  lighting: { lightRange: 48, lightFloor: 0.34, fogNear: 12, fogFar: 56, fogMax: 0.88 },
+  // seventy; the campaign's falloff bottoms out at fifteen. Same curve as the block
+  // (see the note there) so the two look like the same evening.
+  lighting: { lightRange: 130, lightFloor: 0.12, fogNear: 10, fogFar: 160, fogMax: 0.8 },
 };
 
 if (typeof module !== 'undefined' && module.exports) module.exports = { YARD_MAP_SPEC };

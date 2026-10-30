@@ -25,7 +25,7 @@ ASSETS = ROOT / "assets"
 #
 # The inlined <script> blocks, in the order bundle.py emits them (EMBED is handled apart).
 MODULES = ["assets", "collide", "weapons", "engine", "level", "maps/office", "maps/yard",
-           "mode", "audio", "settings", "game", "net", "hud", "main"]
+           "maps/block", "mode", "audio", "settings", "game", "net", "hud", "main"]
 
 
 def main(src=ROOT / "63_ Office Hell.html"):

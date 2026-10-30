@@ -48,7 +48,7 @@ const ctx = vm.createContext({
 });
 
 for (const f of ['game/js/collide.js', 'game/js/weapons.js', 'game/js/engine.js',
-  'game/js/level.js', 'game/js/maps/office.js', 'game/js/maps/yard.js', 'game/js/mode.js',
+  'game/js/level.js', 'game/js/maps/office.js', 'game/js/maps/yard.js', 'game/js/maps/block.js', 'game/js/mode.js',
   'game/js/game.js']) {
   vm.runInContext(fs.readFileSync(REPO + '/' + f, 'utf8'), ctx, { filename: f });
 }

@@ -177,3 +177,9 @@ const OFFICE_THINGS = [
 // The campaign level as buildLevel() wants it. OFFICE_ROWS stays exported on its
 // own as well: the battle royale map stamps this very office in as one of its places.
 const OFFICE_MAP = { name: 'office', rows: OFFICE_ROWS, zones: OFFICE_ZONES, things: OFFICE_THINGS };
+
+// Node requires this: server.js and the tools read the rows to build the battle
+// royale map, which stamps the office in. In the browser it is just a script.
+if (typeof module !== 'undefined' && module.exports) {
+  module.exports = { OFFICE_ROWS, OFFICE_ZONES, OFFICE_THINGS, OFFICE_MAP };
+}

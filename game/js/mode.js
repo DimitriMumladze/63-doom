@@ -12,6 +12,14 @@
 
 const BR_MIN_PLAYERS = 2;
 
+// Which map the battle royale is played on. The server says so in its welcome and
+// both sides have to agree, because everything about a match is sent as positions
+// in it. maps/yard.js is the small one the netcode was built against, kept because a
+// test match on it takes a minute rather than five.
+const BR_MAPS = { block: () => BLOCK_MAP_SPEC, yard: () => YARD_MAP_SPEC };
+let BR_MAP_NAME = 'block';
+const brMapSpec = () => (BR_MAPS[BR_MAP_NAME] || BR_MAPS.block)();
+
 // Each player's colour, used for their name tag, the kill feed and the minimap --
 // not for tinting them. With real colleagues' faces on the sprites, recognising who
 // you are shooting at is the joke, and a coloured multiply over it ruins that. Only
@@ -77,7 +85,7 @@ const Modes = {
 
   br: {
     id: 'br',
-    spec: () => YARD_MAP_SPEC,
+    spec: brMapSpec,
     enemies: false, npcs: true, doors: false, respawn: false,
 
     onStart() { BR.onMatchStart(); },

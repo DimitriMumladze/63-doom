@@ -113,6 +113,7 @@ const Net = {
         if (m.mode === 'br') {
           this.mode = 'br';
           BR.myName = m.name; BR.mySkin = m.skin;
+          if (m.map) BR_MAP_NAME = m.map;      // before Game.start('br') builds it
         } else {
           this.mode = 'coop';
           this.hostId = m.host;
