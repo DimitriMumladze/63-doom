@@ -5,7 +5,19 @@ const MINT = '#44da9d';
 const PURPLE = '#383892';
 const RED = '#e63c32';
 
+// title screen choice when the co-op server is there: [x, y, w, h, label]
+const TITLE_BUTTONS = [[VW / 2 - 106, 147, 100, 16, 'PLAY ALONE'], [VW / 2 + 6, 147, 100, 16, 'PLAY ONLINE']];
+
 const Hud = {
+  // the right wording for the input in use: controller, touch screen or mouse + keyboard
+  say(pad, touch, mouse) { return Input.mode === 'pad' ? pad : Input.mode === 'touch' ? touch : mouse; },
+
+  // which title button (index) is at screen point (x, y), or -1
+  titleButtonAt(x, y) {
+    if (!Net.lobby) return -1;
+    return TITLE_BUTTONS.findIndex(([bx, by, bw, bh]) => x >= bx && x < bx + bw && y >= by && y < by + bh);
+  },
+
   font(size, bold = true) {
     return `${bold ? 'bold ' : ''}${size}px "Courier New", Courier, monospace`;
   },
@@ -17,6 +29,42 @@ const Hud = {
     if (shadow) { g.fillStyle = '#000'; g.fillText(s, x + 1, y + 1); }
     g.fillStyle = color;
     g.fillText(s, x, y);
+  },
+
+  // speech boxes over the street people's heads, in the GeoPixel font
+  drawBubbles(g) {
+    const size = 10, lineH = 12, maxW = 170;   // GeoPixel is drawn on a 10 px grid, so 10 px stays crisp
+    g.font = `${size}px GeoPixel, "Courier New", monospace`;
+    g.textAlign = 'left';
+    g.textBaseline = 'top';
+    for (const n of Game.L.npcs) {
+      if (n.talk <= 0) continue;
+      const s = Engine.project(n.x, n.y, n.h + 0.1);
+      if (!s || s.hidden || s.x < -40 || s.x > VW + 40) continue;
+      // word wrap
+      const lines = [];
+      for (const word of n.n.line.split(' ')) {
+        const last = lines[lines.length - 1];
+        if (last !== undefined && g.measureText(last + ' ' + word).width <= maxW) lines[lines.length - 1] = last + ' ' + word;
+        else lines.push(word);
+      }
+      const w = Math.ceil(Math.max(...lines.map(l => g.measureText(l).width))) + 10;
+      const h = lines.length * lineH + 6;
+      const tipX = Math.round(Math.max(8, Math.min(VW - 8, s.x)));
+      const tipY = Math.round(Math.max(h + 8, Math.min(VH - 4, s.y)));
+      const x = Math.round(Math.max(2, Math.min(VW - 2 - w, tipX - w / 2))), y = tipY - 5 - h;
+      g.globalAlpha = n.talk;
+      // pixel box with clipped corners and a tail down to the head
+      g.fillStyle = '#111';
+      g.fillRect(x + 1, y, w - 2, h); g.fillRect(x, y + 1, w, h - 2);
+      for (let i = 0; i < 5; i++) g.fillRect(tipX - 5 + i, y + h - 1 + i, 2 * (5 - i), 1);
+      g.fillStyle = '#fff';
+      g.fillRect(x + 1, y + 1, w - 2, h - 2);
+      for (let i = 0; i < 4; i++) g.fillRect(tipX - 4 + i, y + h - 1 + i, 2 * (4 - i), 1);
+      g.fillStyle = '#111';
+      lines.forEach((l, i) => g.fillText(l, x + 5, y + 4 + i * lineH));
+      g.globalAlpha = 1;
+    }
   },
 
   drawBar(g) {
@@ -60,7 +108,7 @@ const Hud = {
       const face = Assets.get(tg.type + '/face').img;
       g.drawImage(face, 333, y + 5, 32, 32);
       if (tg.hp <= 0) { g.fillStyle = 'rgba(160,0,0,0.45)'; g.fillRect(333, y + 5, 32, 32); }
-      this.text(g, tg.t.name, 370, y + 6, 12, MINT);
+      this.text(g, tg.t.name, 370, y + 6, tg.t.name.length > 12 ? 9 : 12, MINT);
       const frac = Math.max(0, tg.hp) / tg.t.hp;
       g.strokeStyle = MINT;
       g.strokeRect(370.5, y + 24.5, 100, 8);
@@ -85,6 +133,14 @@ const Hud = {
     g.globalAlpha = 1;
     const z = zoneAt(G.L, G.player.x, G.player.y);
     if (z) this.text(g, z.toUpperCase(), VW - 6, 6, 8, 'rgba(255,255,255,0.6)', 'right');
+    // co-op: a tag over each of the others, and how they're doing under the room name
+    Net.active().forEach((r, i) => {
+      const col = playerColor(r.slot);
+      this.text(g, `P${r.slot}  ${r.dead ? 'FIRED' : r.hp + '%'}`, VW - 6, 18 + i * 10, 8, col, 'right');
+      if (r.dead) return;
+      const s = Engine.project(r.x, r.y, 1.35 + r.z);
+      if (s && !s.hidden && s.x > 0 && s.x < VW) this.text(g, 'P' + r.slot, Math.round(s.x), Math.round(s.y) - 9, 8, col, 'center');
+    });
   },
 
   overlay(g, alpha, color = '0,0,0') {
@@ -98,46 +154,119 @@ const Hud = {
     g.drawImage(logo, VW / 2 - 40, 14, 80, 80);
     this.text(g, 'OFFICE HELL', VW / 2, 100, 30, RED, 'center');
     this.text(g, 'Your coworkers have gone wrong.', VW / 2, 134, 10, '#ddd', 'center');
-    if (Math.floor(t * 2) % 2 === 0) this.text(g, 'CLICK TO START', VW / 2, 150, 14, MINT, 'center');
+    if (Main.joining) {
+      this.text(g, Net.on ? 'JOINING THE OTHERS...' : 'CONNECTING...', VW / 2, 150, 14, MINT, 'center');
+    } else if (Net.lobby) {
+      // the co-op server is there: play alone or go into the office with whoever is online
+      const lob = Net.lobby;
+      TITLE_BUTTONS.forEach(([x, y, w, h, label], i) => {
+        const sel = Main.menu === i, off = i === 1 && lob.full;
+        g.fillStyle = sel ? 'rgba(68,218,157,0.28)' : 'rgba(0,0,0,0.5)';
+        g.fillRect(x, y, w, h);
+        g.strokeStyle = sel ? MINT : '#666';
+        g.strokeRect(x + 0.5, y + 0.5, w - 1, h - 1);
+        this.text(g, label, x + w / 2, y + 4, 10, off ? '#777' : sel ? '#fff' : '#bbb', 'center');
+      });
+      const [x, y, w, h] = TITLE_BUTTONS[1];
+      const who = lob.full ? 'SERVER FULL' : lob.players ? `${lob.players} IN THE OFFICE NOW` : 'NOBODY ONLINE YET';
+      this.text(g, who, x + w / 2, y + h + 2, 8, lob.full ? RED : '#f4e7c0', 'center');
+    } else if (Math.floor(t * 2) % 2 === 0) {
+      this.text(g, this.say('PRESS A TO START', 'TAP TO START', 'CLICK TO START'), VW / 2, 150, 14, MINT, 'center');
+    }
+    if (Input.padBlocked && !window.isSecureContext) {
+      this.text(g, 'CONTROLLER NEEDS HTTPS', VW / 2, 162, 8, RED, 'center');
+    }
     // the crew
-    const crew = ['brute', 'tank', 'irakli', 'rider', 'beard'];
+    const crew = ['brute', 'tank', 'irakli', 'rider', 'beard', 'sandro', 'agamemnov'];
     crew.forEach((id, i) => {
-      const x = VW / 2 - crew.length * 36 + i * 72 + 20;
+      const x = VW / 2 - crew.length * 32 + i * 64 + 16;
       g.fillStyle = PURPLE;
       g.fillRect(x - 1, 172, 34, 34);
-      g.drawImage(Assets.get(id + '/face').img, x, 173, 32, 32);
-      this.text(g, ENEMY_TYPES[id].name, x + 16, 208, 8, ENEMY_TYPES[id].boss ? RED : '#ccc', 'center');
+      // the last boss is a surprise: a question mark instead of his face and name
+      const secret = ENEMY_TYPES[id].final;
+      if (secret) {
+        g.fillStyle = '#140a14';
+        g.fillRect(x, 173, 32, 32);
+        this.text(g, '?', x + 16, 176, 26, RED, 'center');
+      } else g.drawImage(Assets.get(id + '/face').img, x, 173, 32, 32);
+      const name = secret ? '???' : ENEMY_TYPES[id].name;
+      // long names go on two lines so they don't run into the neighbour's
+      const words = name.length > 12 ? name.split(' ') : [name];
+      words.forEach((w, k) => this.text(g, w, x + 16, 208 + k * 9, 8, ENEMY_TYPES[id].boss ? RED : '#ccc', 'center'));
     });
-    this.text(g, 'WASD move · mouse look · click fire · Space jump · C crouch · E doors',
-      VW / 2, 244, 8, '#aaa', 'center');
-    this.text(g, 'Shift run · 1-7 / wheel weapons · M music · Esc pause',
-      VW / 2, 256, 8, '#aaa', 'center');
+    if (Input.mode === 'pad') {
+      this.text(g, 'L-stick move · R-stick look · RT fire · A jump · B crouch · X doors',
+        VW / 2, 244, 8, '#aaa', 'center');
+      this.text(g, 'LT run · LB / RB weapons · VIEW music · MENU pause',
+        VW / 2, 256, 8, '#aaa', 'center');
+    } else if (Input.mode === 'touch') {
+      this.text(g, 'Left thumb move (push to the edge to run) · drag on the right to look',
+        VW / 2, 244, 8, '#aaa', 'center');
+      this.text(g, 'FIRE · JUMP · USE doors · DUCK · GUN switches weapon · || pause',
+        VW / 2, 256, 8, '#aaa', 'center');
+    } else {
+      this.text(g, 'WASD move · mouse look · click fire · Space jump · C crouch · E doors',
+        VW / 2, 244, 8, '#aaa', 'center');
+      this.text(g, 'Shift run · 1-7 / wheel weapons · M music · Esc pause',
+        VW / 2, 256, 8, '#aaa', 'center');
+    }
   },
 
   drawDead(g, t) {
     this.overlay(g, Math.min(0.55, t * 0.6), '120,0,0');
     this.text(g, "YOU'RE FIRED!", VW / 2, 70, 30, '#fff', 'center');
     const by = Game.lastHitBy;
-    if (by) {
+    if (by && by.friendly) {
+      this.text(g, `P${by.slot} got you.`, VW / 2, 118, 16, playerColor(by.slot), 'center');
+      this.text(g, 'FRIENDLY FIRE!', VW / 2, 140, 12, '#f4e7c0', 'center');
+    } else if (by) {
       g.drawImage(Assets.get(by.type + '/face').img, VW / 2 - 24, 108, 48, 48);
       this.text(g, `${by.t.name} got you.`, VW / 2, 160, 12, '#f4e7c0', 'center');
     }
-    if (t > 1 && Math.floor(t * 2) % 2 === 0) this.text(g, 'CLICK TO TRY AGAIN', VW / 2, 182, 12, MINT, 'center');
+    if (t > 1 && Math.floor(t * 2) % 2 === 0) {
+      this.text(g, Net.coop ? this.say('PRESS A TO RESPAWN', 'TAP TO RESPAWN', 'CLICK TO RESPAWN')
+        : this.say('PRESS A TO TRY AGAIN', 'TAP TO TRY AGAIN', 'CLICK TO TRY AGAIN'), VW / 2, 182, 12, MINT, 'center');
+    }
   },
 
+  // a banner just above the status bar; the office stays visible and playable
   drawWin(g, t, stats) {
-    this.overlay(g, Math.min(0.6, t * 0.5));
-    g.drawImage(Assets.get('item/logo63').img, VW / 2 - 28, 20, 56, 56);
-    this.text(g, 'YOU SURVIVED', VW / 2, 84, 26, MINT, 'center');
-    this.text(g, 'THE 63 OFFICE', VW / 2, 112, 18, '#fff', 'center');
-    this.text(g, `Kills ${stats.kills}/${stats.total}   Time ${stats.time}`, VW / 2, 142, 12, '#f4e7c0', 'center');
-    if (t > 1.5 && Math.floor(t * 2) % 2 === 0) this.text(g, 'CLICK TO PLAY AGAIN', VW / 2, 170, 12, MINT, 'center');
+    const y = VH - 40;
+    g.fillStyle = 'rgba(0,0,0,0.45)';
+    g.fillRect(0, y, VW, 40);
+    g.drawImage(Assets.get('item/logo63').img, 6, y + 4, 32, 32);
+    this.text(g, 'YOU SURVIVED THE 63 OFFICE', 44, y + 5, 14, MINT);
+    this.text(g, `Kills ${stats.kills}/${stats.total}   Time ${stats.time}`, 44, y + 24, 10, '#f4e7c0');
+    // on a touch screen the RESTART button at the top is the way back
+    if (Input.mode !== 'touch' && Math.floor(t * 2) % 2 === 0) {
+      this.text(g, Input.usingPad ? 'VIEW  RESTART' : 'R  RESTART', VW - 8, y + 24, 10, MINT, 'right');
+    }
   },
 
   drawPaused(g) {
     this.overlay(g, 0.5);
     this.text(g, 'PAUSED', VW / 2, 90, 26, '#fff', 'center');
-    this.text(g, 'Click to resume', VW / 2, 124, 12, MINT, 'center');
+    this.text(g, this.say('Press A to resume', 'Tap to resume', 'Click to resume'), VW / 2, 124, 12, MINT, 'center');
+    if (Main.soundBlocked()) {
+      this.text(g, this.say('No sound? Press A or click the screen once', 'No sound? Tap the screen once',
+        'No sound? Click the screen once'), VW / 2, 146, 8, '#f4e7c0', 'center');
+    }
+  },
+
+  // #padtest: raw controller state, for checking what reaches the page on a real Xbox
+  drawPadTest(g) {
+    const gp = Input.gp;
+    g.fillStyle = 'rgba(0,0,0,0.75)';
+    g.fillRect(0, 0, VW, 92);
+    const ua = navigator.userActivation;
+    this.text(g, `secure ${window.isSecureContext}  activation ${ua ? ua.hasBeenActive : '?'}  ` +
+      `audio ${Sound.ctx ? Sound.ctx.state : 'none'}  mode ${Input.mode}  xbox ${IS_XBOX}  ${Main.fps} fps`, 4, 4, 8, '#0f0');
+    if (!gp) { this.text(g, Input.padBlocked ? 'getGamepads() blocked / missing' : 'no controller - press a button', 4, 16, 8, '#ff0'); return; }
+    this.text(g, (gp.id || '').slice(0, 70) + '  map ' + gp.mapping, 4, 16, 8, '#ff0');
+    const bs = Array.from(gp.buttons, (b, i) => i + ':' + (b.pressed ? 'X' : b.value > 0.05 ? b.value.toFixed(1) : '.'));
+    for (let r = 0; r * 9 < bs.length; r++) this.text(g, bs.slice(r * 9, r * 9 + 9).join('  '), 4, 28 + r * 11, 8, '#fff');
+    this.text(g, 'axes ' + Array.from(gp.axes, a => a.toFixed(2)).join(' '), 4, 64, 8, '#fff');
+    this.text(g, 'last key ' + (Input.lastKey || '-'), 4, 76, 8, '#aaa');
   },
 
   drawLoading(g, done, total) {

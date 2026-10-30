@@ -17,6 +17,7 @@ const Sound = {
     const d = this.noiseBuf.getChannelData(0);
     for (let i = 0; i < len; i++) d[i] = Math.random() * 2 - 1;
     Music.start(this.ctx, this.noiseBuf);
+    BossMusic.init();
   },
 
   noise(t0, dur, vol, f0, f1, type = 'lowpass', q = 1) {
@@ -83,6 +84,9 @@ const Sound = {
       case 'jump': this.noise(t, 0.08, 0.15, 900, 500, 'bandpass', 2); break;
       case 'land': this.tone(t, 0.12, 0.3, 90, 50, 'sine'); this.noise(t, 0.1, 0.2, 500, 200); break;
       case 'start': [0, 0.12, 0.24].forEach((d, i) => this.tone(t + d, 0.25, 0.25, [220, 277, 330][i], [220, 277, 330][i], 'square')); break;
+      case 'throw': this.noise(t, 0.35, 0.5 * v, 300, 2400, 'bandpass', 3); break;
+      case 'clang': this.tone(t, 0.4, 0.3 * v, 1250, 1180, 'triangle'); this.tone(t, 0.3, 0.2 * v, 1870, 1800, 'sine');
+        this.noise(t, 0.08, 0.4 * v, 4000, 1500, 'highpass'); break;
     }
   },
 };
@@ -137,8 +141,11 @@ const Music = {
   setVolume(v) {
     this.vol = v;
     if (!this.ctx) return;
-    this.out.gain.setTargetAtTime(v * 0.55, this.ctx.currentTime, 0.25);
+    this.out.gain.setTargetAtTime(this.ducked ? 0 : v * 0.55, this.ctx.currentTime, 0.25);
   },
+
+  // silence the procedural soundtrack while the boss song plays
+  duck(on) { this.ducked = on; this.setVolume(this.vol); },
 
   setIntensity(x) { this.targetIntensity = x; },
 
@@ -234,5 +241,66 @@ const Music = {
     g.gain.linearRampToValueAtTime(0, t + dur + 0.05);
     src.connect(flt).connect(g).connect(this.out);
     src.start(t); src.stop(t + dur + 0.1);
+  },
+};
+
+// The bosses' fight songs (embedded MP3s), cross-faded with the procedural soundtrack.
+// One element per song; `el` is the one playing (or last played).
+const BossMusic = {
+  SONGS: ['music/sandro.mp3', 'music/agamemnov.mp3'],
+  tracks: {}, el: null, cur: null, on: false, vol: 0.6, fadeTimer: null,
+
+  init() {
+    if (!window.EMBED) return;
+    for (const key of this.SONGS) {
+      if (this.tracks[key] || !window.EMBED[key]) continue;
+      const el = this.tracks[key] = new Audio(window.EMBED[key]);
+      el.loop = true;
+      el.volume = 0;
+      // init runs inside a click: start and pause the element now so the game loop may play it later
+      const p = el.play();
+      if (p && p.then) p.then(() => { if (!this.on || this.el !== el) el.pause(); }).catch(() => {});
+    }
+  },
+
+  setVolume(v) {
+    this.vol = v;
+    if (this.el && this.on && !this.fadeTimer) this.el.volume = v;
+  },
+
+  play(key) {
+    const el = this.tracks[key];
+    if (!el || (this.on && this.cur === key)) return;
+    if (this.cur !== key) {
+      // another boss's song: cut it off and start this one from the top
+      if (this.el) { clearInterval(this.fadeTimer); this.fadeTimer = null; this.el.pause(); this.el.currentTime = 0; }
+      this.el = el; this.cur = key;
+      el.volume = 0;
+    }
+    this.on = true;
+    Music.duck(true);
+    const p = this.el.play();
+    // blocked by the browser: undo, so the next frame (or click) tries again
+    if (p && p.catch) p.catch(() => { this.on = false; Music.duck(false); });
+    this.fade(this.vol, () => { this.el.volume = this.vol; });   // the volume may have changed mid-fade
+  },
+
+  // fade out, then pause; rewind unless we only paused the game
+  stop(rewind = true) {
+    if (!this.el) return;
+    if (!this.on) { if (rewind) { this.el.pause(); this.el.currentTime = 0; } return; }
+    this.on = false;
+    Music.duck(false);
+    this.fade(0, () => { this.el.pause(); if (rewind) this.el.currentTime = 0; });
+  },
+
+  fade(to, done) {
+    clearInterval(this.fadeTimer);
+    const from = this.el.volume, t0 = performance.now();
+    this.fadeTimer = setInterval(() => {
+      const k = Math.min(1, (performance.now() - t0) / 1000);
+      this.el.volume = Math.max(0, Math.min(1, from + (to - from) * k));
+      if (k >= 1) { clearInterval(this.fadeTimer); this.fadeTimer = null; if (done) done(); }
+    }, 50);
   },
 };
