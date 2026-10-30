@@ -165,12 +165,13 @@ class Bot {
       best = id; bestD = d;
     }
     this.shotAt = now;
-    if (!best) { this.send({ t: 'miss', w: this.weapon || 'shotgun' }); return; }
+    const gun = this.weapon || 'shotgun';
+    if (!best) { this.send({ t: 'shot', w: gun, v: [] }); return; }
     const o = this.others.get(best);
     this.a = Math.atan2(o.y - this.y, o.x - this.x);
     // bots are poor shots: a couple of pellets, not the whole barrel
     const n = 1 + Math.floor(Math.random() * Math.min(3, w.pellets || 1));
-    this.send({ t: 'hit', w: this.weapon || 'shotgun', id: best, n });
+    this.send({ t: 'shot', w: gun, v: [[best, n]] });
   }
 }
 

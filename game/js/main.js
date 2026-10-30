@@ -214,8 +214,10 @@ const Input = {
 const Main = {
   canvas: null, g: null, state: 'loading', stateT: 0, last: 0, hadLock: false, winStats: null, wantFull: false,
   fps: 0, fpsAcc: 0, fpsN: 0, showFps: false,
-  menu: 0,            // title screen choice when the co-op server is there: 0 PLAY ALONE, 1 PLAY ONLINE
+  // title screen choice when the server is there: 0 PLAY ALONE, 1 PLAY ONLINE, 2 BATTLE ROYALE
+  menu: 0,
   joining: false,     // PLAY ONLINE picked, waiting for the server (and the host's first snapshot)
+  joiningBr: false,   // BATTLE ROYALE picked, waiting for the server to let us into the lobby
 
   async boot() {
     const canvas = this.canvas = document.getElementById('screen');
@@ -272,7 +274,7 @@ const Main = {
   setState(s) {
     this.state = s;
     this.stateT = 0;
-    document.body.classList.toggle('playing', s === 'play' || s === 'win');
+    document.body.classList.toggle('playing', s === 'play' || s === 'win' || s === 'spectate');
     document.body.classList.toggle('won', s === 'win');
     if (s === 'paused') BossMusic.stop(false);     // resumes where it was once play starts again
     if (s === 'dead') BossMusic.stop();
@@ -314,10 +316,17 @@ const Main = {
   advance() {
     SideBar.apply();
     if (this.state === 'title') {
-      if (Net.on || this.joining) { /* already on the way into the online game */ }
-      else if (Net.lobby && this.menu === 1) {
+      if (Net.on || this.joining || this.joiningBr) { /* already on the way in */ }
+      else if (Net.lobby && this.menu === 2) {
+        if (Net.lobby.br && Net.lobby.br.players < Net.lobby.br.max) this.joinBattleRoyale();
+      } else if (Net.lobby && this.menu === 1) {
         if (!Net.lobby.full) this.joinOnline();
       } else this.startGame();
+    } else if (this.state === 'lobby') {
+      Net.send({ t: 'ready', v: BR.ready ? 0 : 1 });
+      BR.ready = !BR.ready;
+    } else if (this.state === 'results') {
+      /* the server takes everyone back to the lobby when it is done */
     } else if (this.state === 'paused') {
       this.lock();
       this.setState('play');
@@ -332,8 +341,8 @@ const Main = {
     Input.down = {};      // the A press that started the game must not also jump
   },
 
-  startGame() {
-    Game.start();
+  startGame(modeId) {
+    Game.start(modeId || 'campaign');
     Sound.play('start');
     this.wantFull = Input.mode !== 'mouse';
     this.fullscreen();
@@ -350,6 +359,46 @@ const Main = {
     this.wantFull = Input.mode !== 'mouse';
     this.fullscreen();
     this.lock();
+  },
+
+  // BATTLE ROYALE: into the lobby, where you pick your colleague and say you are ready.
+  // The server starts the match; onBrMatch puts us in it.
+  joinBattleRoyale() {
+    this.joiningBr = true;
+    this.joinT = 0;
+    Net.joinBr(Settings.playerName, Settings.playerSkin);
+    this.wantFull = Input.mode !== 'mouse';
+    this.fullscreen();
+  },
+
+  // in the lobby there is a world to look at behind the panel, so build the yard now
+  toBrLobby() {
+    this.joiningBr = false;
+    if (!Game.L || Game.L.name !== 'yard') Game.start('br');
+    this.setState('lobby');
+    if (document.pointerLockElement) document.exitPointerLock();
+  },
+
+  onBrMatch() {
+    Game.start('br');
+    if (BR.spectating) {
+      this.setState('spectate');
+      Game.say('A match is already running. Watching.');
+      return;
+    }
+    Sound.play('start');
+    this.setState('play');
+    this.lock();
+  },
+
+  onBrDeath() {
+    this.setState('dead');
+    this.deadT = 0;
+  },
+
+  onBrEnd() {
+    this.setState('results');
+    if (document.pointerLockElement) document.exitPointerLock();
   },
 
   // on a TV or a phone the browser bar wastes space; not done for mouse players.
@@ -375,6 +424,7 @@ const Main = {
 
   // in co-op only the host restarts, for everyone; a guest asks the host
   restart() {
+    if (Net.br) return;            // the server runs the matches; it will start the next one
     if (Net.guest) { Net.toHost({ t: 'restartReq' }); return; }
     Game.start();
     Net.send({ t: 'restart' });
@@ -383,6 +433,26 @@ const Main = {
   },
 
   onDeath() { this.setState('dead'); },
+
+  // cycle through the colleagues nobody else has taken
+  pickSkin(dir) {
+    const taken = new Set(BR.roster.filter(e => e.id !== Net.id).map(e => e.skin));
+    const free = SKINS.filter(id => !taken.has(id));
+    if (!free.length) return;
+    const i = free.indexOf(BR.mySkin);
+    const next = free[((i < 0 ? 0 : i + dir) + free.length) % free.length];
+    BR.mySkin = next;
+    Settings.playerSkin = next;
+    Settings.save();
+    Net.send({ t: 'skin', id: next });
+  },
+
+  leaveBr() {
+    if (Net.ws) Net.ws.close();
+    this.setState('title');
+    this.menu = 0;
+    Game.start('campaign');
+  },
 
   onWin() {
     const t = Math.floor(Game.time);
@@ -399,9 +469,15 @@ const Main = {
     Input.pollPad();
     if (Input.pressed('F3')) this.showFps = !this.showFps;
     if (this.state === 'title') {
-      // PLAY ALONE / PLAY ONLINE: arrows, A / D or the d-pad choose, Enter (or click, or A) goes
-      if (Input.pressed('ArrowLeft') || Input.pressed('KeyA') || Input.pressed('Pad14')) this.menu = 0;
-      if (Input.pressed('ArrowRight') || Input.pressed('KeyD') || Input.pressed('Pad15')) this.menu = 1;
+      // PLAY ALONE / PLAY ONLINE / BATTLE ROYALE: arrows, A / D or the d-pad choose,
+      // Enter (or click, or A) goes
+      const n = Net.lobby && Net.lobby.br ? 3 : 2;
+      if (Input.pressed('ArrowLeft') || Input.pressed('KeyA') || Input.pressed('Pad14')) {
+        this.menu = (this.menu + n - 1) % n;
+      }
+      if (Input.pressed('ArrowRight') || Input.pressed('KeyD') || Input.pressed('Pad15')) {
+        this.menu = (this.menu + 1) % n;
+      }
       if (Input.pressed('Enter')) this.advance();
       if (this.joining) {
         this.joinT += dt;
@@ -409,6 +485,26 @@ const Main = {
         if (Net.on && (Net.host || Net.hostStarted)) { this.joining = false; this.startGame(); }
         else if (!Net.ws || this.joinT > 10) { this.joining = false; if (Net.on) Net.ws.close(); }
       }
+      if (this.joiningBr) {
+        this.joinT += dt;
+        if (Net.br) this.toBrLobby();
+        else if (!Net.ws || this.joinT > 10) { this.joiningBr = false; if (Net.on) Net.ws.close(); }
+      }
+    } else if (this.state === 'lobby') {
+      // pick which colleague you are, and say you are ready
+      const dir = (Input.pressed('ArrowRight') || Input.pressed('KeyD') || Input.pressed('Pad15')) ? 1
+        : (Input.pressed('ArrowLeft') || Input.pressed('KeyA') || Input.pressed('Pad14')) ? -1 : 0;
+      if (dir) this.pickSkin(dir);
+      if (Input.pressed('Enter') || Input.pressed('KeyR')) this.advance();
+      if (Input.pressed('Escape')) this.leaveBr();
+    } else if (this.state === 'spectate' || (this.state === 'dead' && Net.br)) {
+      // watching: fire or the arrows move you between the people still standing
+      if (Input.pressed('ArrowRight') || Input.pressed('KeyD') || Input.pressed('Pad15')) BR.nextSpec(1);
+      if (Input.pressed('ArrowLeft') || Input.pressed('KeyA') || Input.pressed('Pad14')) BR.nextSpec(-1);
+      if (Input.pressed('Space')) BR.nextSpec(1);
+      if (this.state === 'dead' && this.stateT > 3) this.setState('spectate');
+    } else if (this.state === 'results') {
+      if (BR.state === 'lobby') this.toBrLobby();
     }
     if (this.state === 'win' && (Input.pressed('KeyR') || Input.pressed('Pad8'))) this.restart();
     if (Input.pressed('Pad9')) {                       // Menu: pause / resume / start
@@ -418,18 +514,32 @@ const Main = {
 
     const g = this.g, p = Game.player;
     if (this.state === 'play' || this.state === 'win') Game.update(dt);
-    else if (this.state === 'dead' || (this.state === 'paused' && Net.coop)) Game.updateWorld(dt);
+    else if (this.state === 'dead' || this.state === 'spectate' || this.state === 'results'
+      || this.state === 'lobby' || (this.state === 'paused' && Net.coop)) {
+      if (Game.L) Game.updateWorld(dt);
+    }
     Net.update(dt);
     // camera: title screen slowly drifts along the street in front of the office
     // eye height: crouch lowers it, jumping raises it, landing dips it
     let cam = { x: p.x, y: p.y, a: p.a, horizon: CY + p.pitch + p.kick * 0.25,
       eyeZ: EYE - 0.4 * p.crouch + p.z - 0.08 * Math.sin(p.land * Math.PI) };
+    const ring = Net.br && this.state !== 'title' && this.state !== 'lobby' ? BR.ring : null;
     if (this.state === 'title') {
       cam = { x: 14 + Math.sin(this.stateT * 0.12) * 7, y: 41.2, a: -Math.PI / 2 + Math.sin(this.stateT * 0.2) * 0.8 };
       Game.time += dt;
       Game.updateNpcs(dt);
       Game.updateLights();
+    } else if (this.state === 'lobby') {
+      // the yard, turning slowly behind the lobby panel
+      const L = Game.L;
+      cam = { x: L.w / 2, y: L.h / 2 + 6, a: -Math.PI / 2 + Math.sin(this.stateT * 0.1) * 0.9 };
+    } else if (this.state === 'spectate' || this.state === 'results') {
+      // over the shoulder of whoever is still standing
+      const t = BR.specTarget();
+      if (t) cam = { x: t.x, y: t.y, a: t.a, horizon: CY, eyeZ: EYE };
     }
+    cam.ring = ring;
+    cam.ringTime = Game.time;
     Engine.render(cam, Game.L, Game.sprites());
     if (this.state === 'play' || this.state === 'paused' || this.state === 'win') this.drawWeapon();
     Engine.wash(255, 0, 0, Game.washR);
@@ -437,9 +547,15 @@ const Main = {
     Engine.present();
     g.fillStyle = '#000';
     g.fillRect(0, VH, VW, SCREEN_H - VH);
-    if (this.state !== 'title') { Hud.drawBar(g); }
+    if (this.state !== 'title' && this.state !== 'lobby') { Hud.drawBar(g); }
     if (this.state === 'play' || this.state === 'win') { Hud.drawBubbles(g); Hud.drawView(g); }
+    if (Net.br && (this.state === 'play' || this.state === 'spectate' || this.state === 'dead')) {
+      Hud.drawBrView(g);
+    }
     if (this.state === 'title') Hud.drawTitle(g, this.stateT);
+    if (this.state === 'lobby') Hud.drawBrLobby(g, this.stateT);
+    if (this.state === 'spectate') Hud.drawSpectate(g);
+    if (this.state === 'results') Hud.drawBrResults(g, this.stateT);
     if (this.state === 'paused') Hud.drawPaused(g);
     if (this.state === 'dead') Hud.drawDead(g, this.stateT);
     if (this.state === 'win') Hud.drawWin(g, this.stateT, this.winStats);

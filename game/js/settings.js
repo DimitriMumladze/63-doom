@@ -5,6 +5,8 @@ const Settings = {
   sens: 1.0,          // multiplier on the base mouse sensitivity
   musicVol: 0.6,
   musicMuted: false,
+  playerName: '',     // who you are in the battle royale (blank: the server names you Pn)
+  playerSkin: 'irakli',
   KEY: 'officehell.settings.v1',
 
   load() {
@@ -13,12 +15,15 @@ const Settings = {
       if (typeof s.sens === 'number') this.sens = Math.min(2, Math.max(0.3, s.sens));
       if (typeof s.musicVol === 'number') this.musicVol = Math.min(1, Math.max(0, s.musicVol));
       if (typeof s.musicMuted === 'boolean') this.musicMuted = s.musicMuted;
+      if (typeof s.playerName === 'string') this.playerName = s.playerName.slice(0, 14);
+      if (typeof s.playerSkin === 'string') this.playerSkin = s.playerSkin;
     } catch (e) { /* private mode / blocked storage: keep defaults */ }
   },
 
   save() {
     try {
-      localStorage.setItem(this.KEY, JSON.stringify({ sens: this.sens, musicVol: this.musicVol, musicMuted: this.musicMuted }));
+      localStorage.setItem(this.KEY, JSON.stringify({ sens: this.sens, musicVol: this.musicVol,
+        musicMuted: this.musicMuted, playerName: this.playerName, playerSkin: this.playerSkin }));
     } catch (e) { /* ignore */ }
   },
 };

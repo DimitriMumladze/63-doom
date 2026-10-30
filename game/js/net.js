@@ -1,32 +1,46 @@
-// Online co-op. The page looks for the co-op server (server.js) on port NET_PORT of the computer it was
-// loaded from, or wherever `?server=host:port` in the page address says. If it's there, the title screen
-// offers PLAY ONLINE next to PLAY ALONE. The first one in is the host: their browser runs the coworkers,
-// doors, pickups and projectiles and sends the others snapshots of it 20 times a second. The others
-// move and aim on their own screen and send the host their shots, rockets, door presses and pickups.
+// Online. The page looks for the server (server.js) on port NET_PORT of the computer it was loaded
+// from, or wherever `?server=host:port` in the page address says. If it's there, the title screen
+// offers PLAY ONLINE and BATTLE ROYALE next to PLAY ALONE.
+//
+// Two different arrangements, because the two games want different things:
+//
+//   co-op          peer to peer through a relay. The first one in is the host: their browser runs the
+//                  coworkers, doors, pickups and projectiles and sends the others snapshots 20 times
+//                  a second. The others move and aim on their own screen and send the host their
+//                  shots, rockets, door presses and pickups.
+//   battle royale  the server is the referee. It owns who is alive, who shot whom and where the ring
+//                  is; this sends it where we are and what we shot at, and draws what comes back.
+//
 // Without a server (or opened as a file) the game is single player as before.
 'use strict';
 
 const NET_PORT = 6363;
 const NET_HZ = 20;
+// co-op recolours one coworker sprite per player; the battle royale gives everyone
+// their own colleague instead, and only tints the slots that had to double up
 const PLAYER_SKIN = 'irakli';
 const PLAYER_TINTS = [[0.55, 1.35, 0.95], [0.6, 0.9, 1.6], [1.5, 1.3, 0.5], [1.5, 0.65, 1.25]];
-const PLAYER_COLORS = ['#44da9d', '#6f9dff', '#f0c040', '#ff7ad0'];
 const E_STATES = ['idle', 'chase', 'attack', 'pain', 'dying', 'dead'];
 const D_STATES = ['closed', 'opening', 'open', 'closing'];
 
 const playerTint = slot => PLAYER_TINTS[(slot - 1) % PLAYER_TINTS.length];
-const playerColor = slot => PLAYER_COLORS[(slot - 1) % PLAYER_COLORS.length];
+const playerColor = slot => slotColor(slot);        // SLOT_COLORS in mode.js, fifteen of them
 const r2 = v => Math.round(v * 100) / 100;
 
 const Net = {
   ws: null, on: false, id: 0, slot: 1, hostId: 0, remotes: {}, sendT: 0, hostStarted: false,
-  lobby: null,        // { players, max, full } while the server is there and we haven't joined
+  mode: 'coop',       // which game we joined: 'coop' (relayed, peer-run) or 'br' (server-run)
+  lobby: null,        // { players, max, br, full } while the server is there and we haven't joined
   out: { fx: [], snd: [], msgs: [] },     // the host's world events since the last snapshot
+  q: 0,               // our own tick counter, echoed back so the server can time our round trip
 
-  get host() { return !this.on || this.id === this.hostId; },
-  get guest() { return this.on && this.id !== this.hostId; },
-  // playing together right now (someone else is connected)
-  get coop() { return this.on && Object.keys(this.remotes).length > 0; },
+  // "runs its own world": true alone, true in a battle royale (there are no coworkers
+  // to run, and the server owns everything else), and only for the host in co-op
+  get host() { return !this.on || this.mode === 'br' || this.id === this.hostId; },
+  get guest() { return this.on && this.mode === 'coop' && this.id !== this.hostId; },
+  // playing co-op together right now (someone else is connected)
+  get coop() { return this.on && this.mode === 'coop' && Object.keys(this.remotes).length > 0; },
+  get br() { return this.on && this.mode === 'br'; },
   // the others who are in the game (not on the title screen)
   active() {
     const out = [];
@@ -64,25 +78,58 @@ const Net = {
     this.ws = ws;
   },
 
-  join() { this.send({ t: 'join' }); },
+  join() { this.mode = 'coop'; this.send({ t: 'join' }); },
+
+  // battle royale: say who we are, then wait for 'welcome' and the lobby
+  joinBr(name, skin) {
+    this.mode = 'br';
+    this.send({ t: 'hello', mode: 'br', name, skin });
+  },
 
   send(m) { if (this.ws && this.ws.readyState === 1) this.ws.send(JSON.stringify(m)); },
   toHost(m) { m.to = this.hostId; this.send(m); },
 
-  addRemote(id, slot) {
-    this.remotes[id] = { id, slot, remote: true, isPlayer: true, r: 0.24, hitR: 0.3, x: 0, y: 0, a: 0, z: 0, crouch: 0,
-      hp: 100, dead: false, on: false, moving: false, weapon: 'pistol', shots: 0, shotT: 9, animT: 0, noise: 0 };
+  addRemote(id, slot, extra) {
+    this.remotes[id] = Object.assign({ id, slot, remote: true, isPlayer: true, r: 0.24, hitR: 0.3,
+      x: 0, y: 0, a: 0, z: 0, crouch: 0, hp: 100, dead: false, deadT: 0, on: false, moving: false,
+      weapon: 'pistol', shots: 0, shotT: 9, animT: 0, noise: 0,
+      skin: PLAYER_SKIN, name: 'P' + slot, dup: false }, extra || {});
+    return this.remotes[id];
   },
 
   recv(m) {
     const G = Game, from = this.remotes[m.from];
     switch (m.t) {
-      case 'lobby': if (!this.on) this.lobby = { players: m.players, max: m.max, full: m.players >= m.max }; break;
-      case 'full': if (this.lobby) this.lobby.full = true; Main.joining = false; break;
-      case 'welcome':
-        this.on = true; this.id = m.id; this.slot = m.slot; this.hostId = m.host; this.lobby = null;
-        for (const p of m.players) this.addRemote(p.id, p.slot);
+      case 'lobby':
+        if (!this.on) this.lobby = { players: m.players, max: m.max, full: m.players >= m.max, br: m.br };
         break;
+      case 'full': if (this.lobby) this.lobby.full = true; Main.joining = false; break;
+      case 'nobr':
+        if (this.lobby) this.lobby.br = null;
+        Main.joining = false;
+        break;
+      case 'welcome':
+        this.on = true; this.id = m.id; this.slot = m.slot; this.lobby = null;
+        if (m.mode === 'br') {
+          this.mode = 'br';
+          BR.myName = m.name; BR.mySkin = m.skin;
+        } else {
+          this.mode = 'coop';
+          this.hostId = m.host;
+          for (const p of m.players) this.addRemote(p.id, p.slot);
+        }
+        break;
+
+      // ---- battle royale: the server is the referee ----
+      case 'blobby': this.brLobby(m); break;
+      case 'match': this.brMatch(m); break;
+      case 'S': this.brSnap(m); break;
+      case 'you': BR.onYou(m); break;
+      case 'fix':
+        // we were somewhere we could not have got to; the server wins
+        if (G.player) { G.player.x = m.x; G.player.y = m.y; }
+        break;
+      case 'end': this.brEnd(m); break;
       case 'join': this.addRemote(m.id, m.slot); G.say(`P${m.slot} joined the game.`); break;
       case 'leave': {
         const r = this.remotes[m.id];
@@ -145,6 +192,87 @@ const Net = {
       }
       case 'restartReq': if (this.host && Main.state === 'win') Main.restart(); break;
     }
+  },
+
+  // ---------------- battle royale ----------------
+  // The roster: everyone in the lobby, their name, their colleague, whether they are
+  // ready. Two people sharing a skin get flagged so one of them can be tinted.
+  brLobby(m) {
+    BR.state = m.state;
+    BR.stateT = m.ct;
+    BR.roster = m.roster;
+    BR.min = m.min; BR.max = m.max; BR.countdown = m.countdown; BR.wait = m.wait;
+    const seen = {};
+    for (const e of m.roster) {
+      const dup = !!seen[e.skin];
+      seen[e.skin] = true;
+      if (e.id === this.id) { BR.mySkin = e.skin; BR.myName = e.name; BR.ready = e.ready; continue; }
+      const r = this.remotes[e.id] || this.addRemote(e.id, e.slot);
+      r.slot = e.slot; r.name = e.name; r.skin = e.skin; r.dup = dup;
+    }
+    for (const id in this.remotes) {
+      if (!m.roster.some(e => String(e.id) === id)) delete this.remotes[id];
+    }
+  },
+
+  // a match is starting (or we walked in on one)
+  brMatch(m) {
+    BR.spawn = m.spawn;
+    BR.kit = m.kit;
+    BR.seed = m.seed;
+    BR.freeze = m.freeze || 0;
+    BR.spectating = !!m.spectate;
+    BR.state = 'live';
+    if (m.ring) BR.ring = Object.assign({ tx: m.ring.cx, ty: m.ring.cy, tr: m.ring.r,
+      phase: 0, shrinking: false, left: 0, dps: 0 }, m.ring);
+    Main.onBrMatch();
+  },
+
+  // 20 Hz: where everyone is, where the ring is, and what just happened
+  brSnap(m) {
+    const G = Game;
+    BR.state = m.st;
+    BR.stateT = m.ct;
+    BR.alive = m.alive;
+    BR.onRing(m.r);
+    const here = {};
+    for (const [id, x, y, a, hp, flags, shots, wIdx, z] of m.p) {
+      here[id] = true;
+      if (id === this.id) continue;
+      const r = this.remotes[id] || this.addRemote(id, id);
+      if (r.tx === undefined) { r.x = x; r.y = y; }
+      r.tx = x; r.ty = y; r.a = a; r.hp = hp; r.z = z || 0;
+      r.on = true;
+      const wasDead = r.dead;
+      r.dead = !!(flags & 1);
+      if (r.dead && !wasDead) r.deadT = 0;
+      r.moving = !!(flags & 2);
+      r.crouch = (flags & 4) ? 1 : 0;
+      r.frozen = !!(flags & 8);
+      const w = Rules_wname(wIdx);
+      if (w) r.weapon = w;
+      // their gun went off: you hear it, and so do you know roughly where they are
+      if (shots > r.shots && !r.dead) {
+        r.shotT = 0;
+        const d = Math.hypot(r.x - G.player.x, r.y - G.player.y);
+        if (d < 30) {
+          Sound.play(WEAPONS[r.weapon].sound, Math.max(0.08, 1 - d / 30));
+          BR.nearbyFire = 1.5;
+        }
+      }
+      r.shots = shots;
+    }
+    for (const e of m.e) {
+      if (e[0] === 'k') BR.onKill(e[1], e[2], e[3], e[4]);
+      else if (e[0] === 'm') G.say(e[1]);
+    }
+  },
+
+  brEnd(m) {
+    BR.board = m.board;
+    BR.winner = m.winner;
+    BR.state = 'over';
+    Main.onBrEnd();
   },
 
   applyRemote(r, m) {
@@ -218,10 +346,12 @@ const Net = {
     for (const id in this.remotes) {
       const r = this.remotes[id];
       r.animT += dt; r.shotT += dt; r.noise = Math.max(0, r.noise - dt);
+      if (r.dead) r.deadT += dt;
       if (r.tx === undefined) continue;
       if (Math.abs(r.tx - r.x) + Math.abs(r.ty - r.y) > 3) { r.x = r.tx; r.y = r.ty; }
       else { r.x += (r.tx - r.x) * k; r.y += (r.ty - r.y) * k; }
     }
+    if (this.mode === 'br') { this.brSend(dt); return; }
     if (this.guest) {
       for (const e of G.enemies) {
         if (e.nx === undefined) continue;
@@ -238,4 +368,21 @@ const Net = {
       dead: p.dead ? 1 : 0, m: p.moving ? 1 : 0, w: p.weapon, s: p.shots });
     if (this.host && this.coop) this.snapshot();
   },
+
+  // Battle royale: all we ever send is where we are and what we are doing. Shots go
+  // separately, the moment the trigger is pulled (see Game.fire).
+  brSend(dt) {
+    this.sendT -= dt;
+    if (this.sendT > 0) return;
+    this.sendT = 1 / NET_HZ;
+    const p = Game.player;
+    if (!p) return;
+    this.q++;
+    this.send({ t: 'i', q: this.q, x: r2(p.x), y: r2(p.y), a: r2(p.a), z: r2(p.z),
+      c: r2(p.crouch), m: p.moving ? 1 : 0, w: p.weapon });
+  },
 };
+
+// the weapon names in the order the server indexes them (see Rules.wnames there)
+const WNAMES = Object.keys(WEAPONS);
+const Rules_wname = i => WNAMES[i] || null;

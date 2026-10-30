@@ -29,8 +29,15 @@ EXTRA_CHARS = ["npc"]
 
 
 def main():
-    crew = re.search(r"const CREW = \[([^\]]*)\]", (GAME / "js" / "assets.js").read_text(encoding="utf-8")).group(1)
-    crew = re.findall(r"'(\w+)'", crew) + EXTRA_CHARS
+    # which chars/<id>/ folders are game assets: the campaign crew plus the battle
+    # royale skins (assets.js keeps both lists), plus the street NPCs.
+    src = (GAME / "js" / "assets.js").read_text(encoding="utf-8")
+    crew = list(EXTRA_CHARS)
+    for name in ("CREW", "SKINS"):
+        m = re.search(r"const %s = \[([^\]]*)\]" % name, src)
+        if not m:
+            raise SystemExit(f"assets.js has no const {name} = [...] for the bundler to read")
+        crew += re.findall(r"'(\w+)'", m.group(1))
     embed, linked = {}, []
     for d in DIRS:
         for f in sorted((ASSETS / d).rglob("*")):

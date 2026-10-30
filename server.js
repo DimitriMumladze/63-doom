@@ -309,8 +309,7 @@ const BR = {
       }
       case 'name': p.name = cleanName(m.name, p.slot); this.pushLobby(); break;
       case 'i': this.input(p, m); break;
-      case 'hit': this.shot(p, m, true); break;
-      case 'miss': this.shot(p, m, false); break;
+      case 'shot': this.shot(p, m); break;
       case 'spec': if (!p.alive && this.players.has(m.id)) p.spec = m.id; break;
     }
   },
@@ -361,12 +360,16 @@ const BR = {
     return [h[0][1], h[0][2]];
   },
 
-  // A shot. The shooter's browser did the raycast and says who it hit -- it has the
-  // geometry and the pellet spread, and re-rolling all that here would only
-  // disagree with what they saw. What the server will not take on trust is the
+  // One trigger pull. The shooter's browser did the raycast and says who it hit --
+  // it has the geometry and the pellet spread, and re-rolling all that here would
+  // only disagree with what they saw. What the server does not take on trust is the
   // damage, the rate of fire, the range, or whether there was a wall in the way.
-  shot(p, m, claimsHit) {
-    if (this.state !== 'live' || !p.alive) return;
+  //
+  // One message per shot, listing every victim and how many pellets found them: a
+  // shotgun blast that catches two people is still one pull of one trigger, and
+  // rate-limiting it per message would otherwise throw the second victim away.
+  shot(p, m) {
+    if (this.state !== 'live' || !p.alive || p.frozen > 0) return;
     const name = m.w;
     const w = Rules.WEAPONS[name];
     if (!w) return;
@@ -375,23 +378,27 @@ const BR = {
     if (now - last < w.cool * 1000 * 0.75) return;        // firing faster than the gun can
     p.lastShot[name] = now;
     p.shots++;
-    if (!claimsHit) return;
 
-    const victim = this.players.get(m.id);
-    if (!victim || victim === p || !victim.alive) return;
-    if (victim.frozen > 0 || p.frozen > 0) return;             // nobody shoots during the drop
-
-    const [vx, vy] = this.rewind(victim, Math.min(400, p.rtt / 2 + 1000 / HZ));
-    const d = Math.hypot(vx - p.x, vy - p.y);
-    const [far, full] = RANGE[name] || [40, 40];
-    if (d > far) return;
-    if (!Rules.canSee(Rules.C, p.x, p.y, vx, vy)) return;
-
-    const pellets = Math.max(1, Math.min(w.pellets || 1, Math.round(+m.n || 1)));
-    let dmg = 0;
-    for (let i = 0; i < pellets; i++) dmg += randi(w.dmg[0], w.dmg[1]);
-    if (d > full) dmg *= Math.max(0.25, 1 - (d - full) / (far - full));   // shotguns at distance
-    this.hurt(victim, Math.round(dmg), p, name);
+    const claims = Array.isArray(m.v) ? m.v.slice(0, 8) : [];
+    let budget = w.pellets || 1;                          // no more pellets than the gun holds
+    const back = Math.min(400, p.rtt / 2 + 1000 / HZ);
+    for (const claim of claims) {
+      if (budget <= 0) break;
+      const victim = this.players.get(Array.isArray(claim) ? claim[0] : claim);
+      if (!victim || victim === p || !victim.alive || victim.frozen > 0) continue;
+      // where they were when the shooter saw them, not where they are now
+      const [vx, vy] = this.rewind(victim, back);
+      const d = Math.hypot(vx - p.x, vy - p.y);
+      const [far, full] = RANGE[name] || [40, 40];
+      if (d > far) continue;
+      if (!Rules.canSee(Rules.C, p.x, p.y, vx, vy)) continue;
+      const pellets = Math.max(1, Math.min(budget, Math.round(+claim[1] || 1)));
+      budget -= pellets;
+      let dmg = 0;
+      for (let i = 0; i < pellets; i++) dmg += randi(w.dmg[0], w.dmg[1]);
+      if (d > full) dmg *= Math.max(0.25, 1 - (d - full) / (far - full));   // shotguns at distance
+      this.hurt(victim, Math.round(dmg), p, name);
+    }
   },
 
   // the same arithmetic as Game.hurtPlayer, so the number on your screen is the number here
@@ -608,7 +615,7 @@ const BR = {
       if (n >= this.MIN && (ready === n || this.t > LOBBY_WAIT)) {
         this.state = 'countdown';
         this.t = 0;
-        this.say('Everyone to the yard.');
+        log(`countdown: ${n} players, ${ready} ready`);
       }
     } else if (this.state === 'countdown') {
       if (n < this.MIN) { this.state = 'lobby'; this.t = 0; this.say('Not enough people. Waiting.'); }
@@ -672,7 +679,8 @@ const BR = {
     if (!Rules) return;
     const roster = [...this.players.values()].map(p => ({
       id: p.id, slot: p.slot, name: p.name, skin: p.skin, ready: p.ready, late: p.late }));
-    const m = { t: 'blobby', state: this.state, t: r2(this.t), roster,
+    // ct, not t: t is the message type, and a second t silently ate it
+    const m = { t: 'blobby', state: this.state, ct: r2(this.t), roster,
       min: this.MIN, max: this.MAX, countdown: COUNTDOWN, wait: LOBBY_WAIT };
     for (const p of this.players.values()) send(p.conn, m);
   },

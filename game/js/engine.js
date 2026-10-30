@@ -9,6 +9,9 @@ const CY = VH / 2;
 const EYE = 1.0;          // eye height; equals WALL_H - EYE so floor/ceiling rows mirror
                           // (WALL_H lives in collide.js, which the server shares)
 const FOV = 66 * Math.PI / 180;
+// the battle royale ring: how tall the curtain of static stands, and its colour
+const RING_H = 6.0;
+const RING_R = 170, RING_G = 225, RING_B = 255;
 const PLANE = Math.tan(FOV / 2);
 const PROJ = (VW / 2) / PLANE;
 
@@ -22,6 +25,7 @@ const Engine = {
   ltop: new Int16Array(VW),      // per-column lintel span (facade above a front door)
   lbot: new Int16Array(VW),
   skyU: new Int32Array(VW),      // per-column sky panorama column
+  ringT: new Float32Array(VW),   // per-column distance to the battle royale ring, 1e9 = not in view
   flash: 0,               // extra light from muzzle flashes / explosions
 
   init(canvas) {
@@ -226,6 +230,14 @@ const Engine = {
       }
     }
 
+    // ---------------- the battle royale ring ----------------
+    // over the walls and the flats, under the sprites: a coworker standing in front
+    // of the gas is in front of it, and one standing behind shows through it
+    if (cam.ring) {
+      this.ringPass(cam, cam.ring);
+      this.drawRing(cam.ring, cam.ringTime || 0);
+    } else this.ringT.fill(1e9);
+
     // ---------------- sprites ----------------
     const invDet = 1 / (plX * dirY - dirX * plY);
     const vis = [];
@@ -278,6 +290,82 @@ const Engine = {
     }
   },
 
+  // The battle royale ring, drawn as a curtain of static standing on the circle.
+  //
+  // There is no geometry to it: for each column we solve the camera ray against the
+  // circle. The DDA's `dist` is the ray parameter for the *unnormalised* camera ray
+  // (that is why PROJ/dist projects correctly), so solving with the same unnormalised
+  // (rx, ry) gives a number directly comparable with zbuf -- no perpendicular
+  // correction, no fish-eye. Inside the ring you see the far wall, so we want the
+  // exit; outside it, the near one.
+  //
+  // Must run after the walls and flats and before the sprites, so that it is behind
+  // anything nearer than it and in front of anything further.
+  ringPass(cam, ring) {
+    const v = this.view;
+    if (!v || !ring) return;
+    const ox = v.px - ring.cx, oy = v.py - ring.cy;
+    const cc = ox * ox + oy * oy - ring.r * ring.r;
+    const rt = this.ringT;
+    for (let x = 0; x < VW; x++) {
+      const camX = 2 * (x + 0.5) / VW - 1;
+      const rx = v.dirX + v.plX * camX, ry = v.dirY + v.plY * camX;
+      const A = rx * rx + ry * ry;
+      const B = ox * rx + oy * ry;            // half of the usual b
+      const disc = B * B - A * cc;
+      let t = 1e9;
+      if (disc > 0) {
+        const sq = Math.sqrt(disc);
+        const t0 = (-B - sq) / A, t1 = (-B + sq) / A;
+        t = t0 > 0.04 ? t0 : (t1 > 0.04 ? t1 : 1e9);
+      }
+      rt[x] = t < this.zbuf[x] ? t : 1e9;
+    }
+  },
+
+  // the blend itself; `time` only drives the shimmer
+  drawRing(ring, time) {
+    if (!ring) return;
+    const buf = this.buf, rt = this.ringT;
+    const v = this.view;
+    if (!v) return;
+    const ox = v.px - ring.cx, oy = v.py - ring.cy;
+    const horizon = this.horizon, eyeZ = this.eyeZ;
+    for (let x = 0; x < VW; x++) {
+      const t = rt[x];
+      if (t > 1e8) continue;
+      const top = horizon - (RING_H - eyeZ) * PROJ / t;
+      const bot = horizon + eyeZ * PROJ / t;
+      const y0 = top < 0 ? 0 : Math.ceil(top);
+      const y1 = bot > VH ? VH : Math.ceil(bot);
+      if (y1 <= y0) continue;
+      // where on the circle this column lands: gives the curtain a direction to drift in
+      const camX = 2 * (x + 0.5) / VW - 1;
+      const wx = ox + (v.dirX + v.plX * camX) * t, wy = oy + (v.dirY + v.plY * camX) * t;
+      const wa = Math.atan2(wy, wx);
+      let a = 0.30 + 0.17 * Math.sin(wa * 9 + time * 2.2);
+      if (t > 6) a *= 6 / t;                       // it fades out with distance
+      if (a <= 0.01) continue;
+      const ia = 1 - a, ar = RING_R * a, ag = RING_G * a, ab = RING_B * a;
+      // a dimmer band every few rows, so it reads as a sheet and not a wash
+      const ia2 = 1 - a * 0.45, ar2 = RING_R * a * 0.45, ag2 = RING_G * a * 0.45, ab2 = RING_B * a * 0.45;
+      for (let y = y0; y < y1; y++) {
+        const i = y * VW + x;
+        const c = buf[i];
+        const band = ((y + (time * 14 | 0)) & 7) < 4;
+        const f = band ? ia : ia2;
+        const br = band ? ar : ar2, bg = band ? ag : ag2, bb = band ? ab : ab2;
+        let r = (c & 255) * f + br;
+        let gg = ((c >>> 8) & 255) * f + bg;
+        let b = ((c >>> 16) & 255) * f + bb;
+        if (r > 255) r = 255;
+        if (gg > 255) gg = 255;
+        if (b > 255) b = 255;
+        buf[i] = 0xff000000 | ((b | 0) << 16) | ((gg | 0) << 8) | (r | 0);
+      }
+    }
+  },
+
   drawSprite(s, tx, ty, level, flash) {
     const tex = s.tex;
     const buf = this.buf, zbuf = this.zbuf;
@@ -302,8 +390,17 @@ const Engine = {
     const tw = tex.w, th = tex.h, td = tex.data;
     const uStep = tw / wpx, vStep = th / hpx;
     const flip = s.flip;
+    // if the ring's curtain is nearer than this sprite in a column, what shows there
+    // is mostly curtain: pre-mix the shade for those columns rather than per pixel
+    const rt = this.ringT;
+    const k = 0.42;
+    const hr = fr * (1 - k) + (RING_R / 255) * k * 0.9;
+    const hg = fg * (1 - k) + (RING_G / 255) * k * 0.9;
+    const hb = fb * (1 - k) + (RING_B / 255) * k * 0.9;
     for (let x = x0; x < x1; x++) {
       if (ty >= zbuf[x]) continue;
+      const hazed = ty > rt[x];
+      const sr = hazed ? hr : fr, sg = hazed ? hg : fg, sb = hazed ? hb : fb;
       let tu = ((x + 0.5 - left) * uStep) | 0;
       if (tu >= tw) tu = tw - 1;
       if (flip) tu = tw - 1 - tu;
@@ -313,7 +410,7 @@ const Engine = {
         if (tv >= th) tv = th - 1;
         const c = td[tv * tw + tu];
         if ((c >>> 24) < 128) continue;
-        buf[y * VW + x] = shade(c, fr, fg, fb);
+        buf[y * VW + x] = shade(c, sr, sg, sb);
       }
     }
   },
