@@ -2,6 +2,49 @@
 
 Open `63_ Office Hell.html` in a browser to play alone. It's live at http://31.97.38.206/officehell/.
 
+## Repository layout
+
+```
+63_ Office Hell.html   the game that ships -- one self-contained file, edited directly
+server.js              optional co-op server (see below)
+game/                  older modular source: index.html + js/*.js
+assets/                PNG art the game is built from (chars, textures, props, weapons, items, fx)
+tools/                 Python asset generators, the bundler, and deploy.sh
+```
+
+## Two codebases
+
+Read this before editing anything.
+
+`63_ Office Hell.html` is the real game. It started life as the output of `tools/bundle.py`,
+but every change since -- Xbox controller and touch controls, the street NPCs, THE AGAMEMNOV,
+online co-op, friendly fire -- was made **directly in that file**. It is the only version that
+has those features, and it is what production serves.
+
+`game/` is the modular source the file was originally bundled from, kept here for the art
+pipeline and for reference. It is an ancestor: it has none of the features listed above.
+
+So:
+
+- **Changing the game?** Edit `63_ Office Hell.html`.
+- **Do not run `tools/bundle.py` and ship its output.** It rebuilds from `game/` into
+  `dist/63-office-hell.html` and would roll production back to the 28 Oct state.
+- `tools/deploy.sh` uploads `63_ Office Hell.html`, which is correct. Keep it that way.
+
+Folding the new features back into `game/` so there is one source again is worth doing, but
+nobody has done it yet.
+
+## Art pipeline
+
+The scripts in `tools/` generate the PNGs in `assets/`: `heads.py` and `bodies.py` build the
+crew sprites, `office_textures.py` the walls and floors, `fp_weapons.py` the first-person guns,
+`make_items.py` the pickups. `build_characters.py` drives the character sheets and
+`preview_office.py` renders a look at the level. They need Python with Pillow.
+
+The full-resolution source photographs of the crew live in `assets/source/` and are **not**
+committed -- this repo is public and the bundler never reads them. Get them from whoever
+generated the sprites if you need to re-run the character scripts.
+
 ## Online co-op
 
 When the co-op server (`server.js`) runs on the same computer as the website, the title screen

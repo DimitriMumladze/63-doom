@@ -1,0 +1,108 @@
+{
+  "brute": {
+    "name": "DIMITRI",
+    "role": "Fireball thrower",
+    "weapon": "fireball",
+    "hp": 60,
+    "scale": 1.0,
+    "seated": false,
+    "frames": [
+      "idle",
+      "walk1",
+      "walk2",
+      "walk3",
+      "attack1",
+      "attack2",
+      "pain",
+      "death1",
+      "death2",
+      "death3",
+      "death4"
+    ]
+  },
+  "tank": {
+    "name": "NIKOLOZ",
+    "role": "Brawler (melee charger)",
+    "weapon": "fists",
+    "hp": 120,
+    "scale": 1.0,
+    "seated": false,
+    "frames": [
+      "idle",
+      "walk1",
+      "walk2",
+      "walk3",
+      "attack1",
+      "attack2",
+      "pain",
+      "death1",
+      "death2",
+      "death3",
+      "death4"
+    ]
+  },
+  "irakli": {
+    "name": "IRAKLI",
+    "role": "Shotgunner",
+    "weapon": "shotgun",
+    "hp": 50,
+    "scale": 1.0,
+    "seated": false,
+    "frames": [
+      "idle",
+      "walk1",
+      "walk2",
+      "walk3",
+      "attack1",
+      "attack2",
+      "pain",
+      "death1",
+      "death2",
+      "death3",
+      "death4"
+    ]
+  },
+  "beard": {
+    "name": "BIG DIMITRI",
+    "role": "Boss: rocket launcher",
+    "weapon": "rocket",
+    "hp": 400,
+    "scale": 1.15,
+    "seated": false,
+    "frames": [
+      "idle",
+      "walk1",
+      "walk2",
+      "walk3",
+      "attack1",
+      "attack2",
+      "pain",
+      "death1",
+      "death2",
+      "death3",
+      "death4"
+    ]
+  },
+  "rider": {
+    "name": "LASHA",
+    "role": "Plasma rifle, fast",
+    "weapon": "plasma",
+    "hp": 70,
+    "scale": 1.0,
+    "seated": true,
+    "frames": [
+      "idle",
+      "walk1",
+      "walk2",
+      "walk3",
+      "walk4",
+      "attack1",
+      "attack2",
+      "pain",
+      "death1",
+      "death2",
+      "death3",
+      "death4"
+    ]
+  }
+}
