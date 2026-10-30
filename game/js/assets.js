@@ -4,7 +4,7 @@
 
 const ASSET_BASE = '../assets/';
 
-const CREW = ['brute', 'tank', 'irakli', 'beard', 'rider'];
+const CREW = ['brute', 'tank', 'irakli', 'beard', 'rider', 'sandro', 'agamemnov'];
 const STAND_FRAMES = ['idle', 'walk1', 'walk2', 'walk3', 'attack1', 'attack2', 'pain',
   'death1', 'death2', 'death3', 'death4'];
 const SEAT_FRAMES = ['idle', 'walk1', 'walk2', 'walk3', 'walk4', 'attack1', 'attack2', 'pain',
@@ -13,21 +13,39 @@ const SEAT_FRAMES = ['idle', 'walk1', 'walk2', 'walk3', 'walk4', 'attack1', 'att
 const MANIFEST = (() => {
   const list = [];
   const walls = ['plaster', 'window', 'cabinet', 'concrete', 'radiator', 'door', 'server', 'tiles',
-    'whiteboard', 'plaster_hell', 'concrete_hell', 'server_hell', 'tiles_hell'];
+    'whiteboard', 'plaster_hell', 'concrete_hell', 'server_hell', 'tiles_hell',
+    'plaster_grey', 'plaster_grey_panel', 'glass_wall', 'door_entry',
+    'facade_pillar', 'facade_glass', 'facade_slats', 'door_front', 'fence_metal', 'wall_concrete_low',
+    'soviet_wall', 'door_soviet', 'poster_0', 'poster_1', 'poster_2', 'kremlin_wall', 'flag_ru_wall', 'door_kremlin'];
   for (const w of walls) list.push(['tex/' + w, 'textures/' + w + '.png']);
   for (let i = 0; i < 12; i++) {
     const n = String(i).padStart(2, '0');
     list.push(['tex/mural_' + n, 'textures/mural_' + n + '.png']);
   }
-  for (const f of ['floor_oak', 'floor_oak_hell', 'floor_server', 'ceil_concrete', 'ceil_tray', 'ceil_light']) {
+  // multi-cell wall pictures (see WALL_STRIPS)
+  for (const [s, n] of [['dino', 4], ['stairs', 4], ['sign63', 2], ['portrait', 2]]) {
+    for (let i = 0; i < n; i++) list.push(['tex/' + s + '_' + i, 'textures/' + s + '_' + i + '.png']);
+  }
+  for (const f of ['floor_oak', 'floor_oak_hell', 'floor_server', 'ceil_concrete', 'ceil_tray', 'ceil_light',
+    'floor_gloss', 'ceil_dark', 'ceil_linear', 'sidewalk', 'curb', 'asphalt', 'sky_dusk',
+    'carpet_red', 'ceil_ornate', 'ceil_chandelier']) {
     list.push(['tex/' + f, 'textures/' + f + '.png']);
   }
   for (const p of ['desk', 'desk_lego', 'desk_broken', 'chair_black', 'chair_grey', 'bin', 'plant', 'lamp',
-    'blood_pool', 'spark_0', 'spark_1']) list.push(['prop/' + p, 'props/' + p + '.png']);
+    'blood_pool', 'spark_0', 'spark_1', 'sofa', 'coffee_table', 'scooter', 'hanging_chair', 'pendant',
+    'doormat', 'car_lexus_front', 'car_lexus_side', 'car_lexus_rear', 'car_bmw_front', 'car_bmw_side',
+    'car_bmw_rear', 'streetlamp', 'lamp_glow', 'shrub', 'ac_unit', 'plate65',
+    'soviet_flag', 'bust', 'samovar', 'tv_rubin', 'desk_soviet', 'matryoshka', 'coat_stand', 'star_lamp',
+    'russian_flag', 'throne',
+  ]) list.push(['prop/' + p, 'props/' + p + '.png']);
   for (const c of CREW) {
     const frames = c === 'rider' ? SEAT_FRAMES : STAND_FRAMES;
     for (const f of frames) list.push([c + '/' + f, 'chars/' + c + '/' + f + '.png']);
     list.push([c + '/face', 'chars/' + c + '/face.png']);
+  }
+  // the friendly people out on the street (see NPCS)
+  for (const f of ['bmw_0', 'bmw_1', 'lexus_0', 'lexus_1', 'rider_front', 'rider_side', 'rider_rear']) {
+    list.push(['npc/' + f, 'chars/npc/' + f + '.png']);
   }
   const guns = { pistol: 2, shotgun: 3, dbshotgun: 3, chaingun: 3, rifle: 3, rocketl: 3, plasmagun: 3 };
   for (const [g, n] of Object.entries(guns)) {
@@ -39,7 +57,10 @@ const MANIFEST = (() => {
   }
   const fx = ['fireball_0', 'fireball_1', 'plasma_0', 'plasma_1', 'rocket_0', 'rocket_1',
     'explode_0', 'explode_1', 'explode_2', 'zap_0', 'zap_1', 'zap_2',
-    'puff_0', 'puff_1', 'puff_2', 'blood_0', 'blood_1', 'blood_2'];
+    'puff_0', 'puff_1', 'puff_2', 'blood_0', 'blood_1', 'blood_2',
+    'hammer_0', 'hammer_1', 'hammer_2', 'hammer_3', 'sickle_0', 'sickle_1', 'sickle_2', 'sickle_3',
+    'spear_0', 'spear_1', 'spear_2', 'spear_3',
+    'steam_0', 'steam_1', 'steam_2', 'smoke_0', 'smoke_1', 'smoke_2'];
   for (const f of fx) list.push(['fx/' + f, 'fx/' + f + '.png']);
   return list;
 })();
@@ -49,7 +70,7 @@ const Assets = {
 
   load(onProgress) {
     let done = 0;
-    return Promise.all(MANIFEST.map(([key, path]) => new Promise((resolve, reject) => {
+    return Promise.all([this.loadFont(), ...MANIFEST.map(([key, path]) => new Promise((resolve, reject) => {
       const im = new Image();
       im.onload = () => {
         Assets.img[key] = Assets.toTex(im);
@@ -58,7 +79,17 @@ const Assets = {
       };
       im.onerror = () => reject(new Error('missing asset ' + path));
       im.src = (window.EMBED && window.EMBED[path]) || (ASSET_BASE + path);
-    })));
+    }))]);
+  },
+
+  // GeoPixel (Georgian pixel font) for the speech boxes; without it they fall back to the HUD font
+  loadFont() {
+    if (!window.FontFace || !document.fonts) return Promise.resolve();
+    const path = 'fonts/geopixel.ttf';
+    const src = (window.EMBED && window.EMBED[path]) || (ASSET_BASE + path);
+    return new FontFace('GeoPixel', 'url(' + src + ')').load()
+      .then(f => { document.fonts.add(f); })
+      .catch(err => console.warn('GeoPixel font not loaded', err));
   },
 
   toTex(im) {

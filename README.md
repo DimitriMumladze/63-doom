@@ -5,34 +5,41 @@ Open `63_ Office Hell.html` in a browser to play alone. It's live at http://31.9
 ## Repository layout
 
 ```
-63_ Office Hell.html   the game that ships -- one self-contained file, edited directly
+63_ Office Hell.html   the game: one self-contained file, built by tools/bundle.py
 server.js              optional co-op server (see below)
-game/                  older modular source: index.html + js/*.js
-assets/                PNG art the game is built from (chars, textures, props, weapons, items, fx)
-tools/                 Python asset generators, the bundler, and deploy.sh
+game/                  the source -- index.html + js/*.js
+assets/                art, music and the Georgian pixel font, embedded at build time
+tools/                 asset generators, bundle.py, unbundle.py, deploy.sh
 ```
 
-## Two codebases
+## Building
 
-Read this before editing anything.
+`63_ Office Hell.html` is generated. Edit the source in `game/`, then:
 
-`63_ Office Hell.html` is the real game. It started life as the output of `tools/bundle.py`,
-but every change since -- Xbox controller and touch controls, the street NPCs, THE AGAMEMNOV,
-online co-op, friendly fire -- was made **directly in that file**. It is the only version that
-has those features, and it is what production serves.
+```
+py tools/bundle.py
+```
 
-`game/` is the modular source the file was originally bundled from, kept here for the art
-pipeline and for reference. It is an ancestor: it has none of the features listed above.
+That inlines `game/js/*.js` and embeds all 274 files under `assets/` as data URIs, so the
+result opens straight from disk with no server and no loose files. The build is
+deterministic -- same source in, byte-identical file out -- so a rebuild with no source
+changes leaves git clean. `bash tools/deploy.sh` rebuilds and uploads in one step.
 
-So:
+Unbundled, `game/index.html` runs too: it loads the same assets from `../assets/` instead
+of from `window.EMBED`. Handy for debugging, since you get real filenames and line numbers.
 
-- **Changing the game?** Edit `63_ Office Hell.html`.
-- **Do not run `tools/bundle.py` and ship its output.** It rebuilds from `game/` into
-  `dist/63-office-hell.html` and would roll production back to the 28 Oct state.
-- `tools/deploy.sh` uploads `63_ Office Hell.html`, which is correct. Keep it that way.
+### If someone edits the built file directly
 
-Folding the new features back into `game/` so there is one source again is worth doing, but
-nobody has done it yet.
+For a stretch in late October the single HTML *was* the only copy, and co-op, the bosses,
+the street NPCs, gamepad and touch support were all written straight into it. That is undone:
+`tools/unbundle.py` splits a built file back into `game/` and `assets/`, and was used to
+recover exactly that work. If the shipped file ever runs ahead again:
+
+```
+py tools/unbundle.py            # or: py tools/unbundle.py some-other-build.html
+```
+
+Then rebuild and confirm you get the same file back.
 
 ## Art pipeline
 

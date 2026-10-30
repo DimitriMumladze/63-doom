@@ -19,6 +19,9 @@ const Engine = {
   zbuf: new Float32Array(VW),
   wtop: new Int16Array(VW),      // per-column wall span, so floor/ceiling skip covered pixels
   wbot: new Int16Array(VW),
+  ltop: new Int16Array(VW),      // per-column lintel span (facade above a front door)
+  lbot: new Int16Array(VW),
+  skyU: new Int32Array(VW),      // per-column sky panorama column
   flash: 0,               // extra light from muzzle flashes / explosions
 
   init(canvas) {
@@ -91,12 +94,13 @@ const Engine = {
     const px = cam.x, py = cam.y;
     const flash = this.flash;
     const lw = level.w, lh = level.h;
+    this.view = { px, py, dirX, dirY, plX, plY };
 
     // ---------------- walls ----------------
     const horizon = this.horizon = cam.horizon === undefined ? CY : cam.horizon;
     const eyeZ = this.eyeZ = cam.eyeZ === undefined ? EYE : cam.eyeZ;
     const zbuf = this.zbuf;
-    const wtop = this.wtop, wbot = this.wbot;
+    const wtop = this.wtop, wbot = this.wbot, ltop = this.ltop, lbot = this.lbot;
     for (let x = 0; x < VW; x++) {
       const camX = 2 * (x + 0.5) / VW - 1;
       const rx = dirX + plX * camX, ry = dirY + plY * camX;
@@ -106,17 +110,29 @@ const Engine = {
       const sx = rx < 0 ? -1 : 1, sy = ry < 0 ? -1 : 1;
       let sideX = (rx < 0 ? px - mx : mx + 1 - px) * ddx;
       let sideY = (ry < 0 ? py - my : my + 1 - py) * ddy;
-      let side = 0, dist = 64, u = 0, tex = null, pmx = mx, pmy = my;
+      let side = 0, dist = 64, u = 0, tex = null, pmx = mx, pmy = my, wallH = WALL_H;
+      // last open cell the ray passed through: walls seen from the street are tall and
+      // show their outside face, the same walls seen from inside stay ceiling high
+      let from = (mx >= 0 && my >= 0 && mx < lw && my < lh) ? my * lw + mx : -1;
+      let lin = null, linD = 0, linU = 0, linLi = 0;
       for (let i = 0; i < 256; i++) {
         pmx = mx; pmy = my;
         if (sideX < sideY) { dist = sideX; sideX += ddx; mx += sx; side = 0; } else { dist = sideY; sideY += ddy; my += sy; side = 1; }
         if (mx < 0 || my < 0 || mx >= lw || my >= lh) { tex = level.defWall; break; }
         const idx = my * lw + mx;
-        if (!level.solid[idx]) continue;
+        if (!level.solid[idx]) { from = idx; continue; }
+        const outside = from >= 0 && level.sky[from] === 1;
         const door = level.doorAt[idx];
         if (door) {
+          if (outside && level.lintel[idx] && !lin) {
+            // the facade above a front door, drawn at the door's outer face
+            lin = level.lintel[idx]; linD = dist; linLi = from;
+            const h = side === 0 ? py + dist * ry : px + dist * rx;
+            linU = h - Math.floor(h);
+            if ((side === 0 && rx < 0) || (side === 1 && ry > 0)) linU = 1 - linU;
+          }
           const t = this.doorHit(door, px, py, rx, ry, mx, my);
-          if (t < 0) continue;
+          if (t < 0) { from = idx; continue; }
           dist = t;
           const hit = door.orient === 'h' ? px + t * rx : py + t * ry;
           u = (hit - Math.floor(hit)) - door.open;
@@ -125,14 +141,17 @@ const Engine = {
           pmx = mx; pmy = my;
           break;
         }
-        tex = level.wallTex[idx];
+        tex = (!outside && level.wallTexIn[idx]) || level.wallTex[idx];
+        if (outside) wallH = level.wallH[idx];
         const hit = side === 0 ? py + dist * ry : px + dist * rx;
         u = hit - Math.floor(hit);
         if ((side === 0 && rx < 0) || (side === 1 && ry > 0)) u = 1 - u;
         break;
       }
       zbuf[x] = dist;
-      const top = horizon - (WALL_H - eyeZ) * PROJ / dist;
+      ltop[x] = 0; lbot[x] = 0;
+      if (lin) this.drawLintel(x, lin, linD, linU, linLi, level, horizon, eyeZ, flash);
+      const top = horizon - (wallH - eyeZ) * PROJ / dist;
       const bot = horizon + eyeZ * PROJ / dist;
       const y0 = top < 0 ? 0 : Math.ceil(top);
       const y1 = bot > VH ? VH : Math.ceil(bot);
@@ -158,6 +177,15 @@ const Engine = {
     // ---------------- floor + ceiling ----------------
     const r0x = dirX - plX, r0y = dirY - plY;
     const r1x = dirX + plX, r1y = dirY + plY;
+    // open-air cells show the sky panorama instead of a ceiling
+    const sky = level.skyTex, skyU = this.skyU;
+    const camCell = Math.floor(py) * lw + Math.floor(px);
+    const camOut = camCell >= 0 && camCell < lw * lh && level.sky[camCell] === 1;
+    for (let x = 0; x < VW; x++) {
+      const ang = cam.a + Math.atan((2 * (x + 0.5) / VW - 1) * PLANE);
+      const f = ang / (2 * Math.PI);
+      skyU[x] = Math.floor((f - Math.floor(f)) * sky.w) % sky.w;
+    }
     // the horizon moves with pitch (looking up/down) and the eye height with
     // jumping/crouching, so floor and ceiling rows are cast separately
     for (let y = 0; y < VH; y++) {
@@ -173,9 +201,16 @@ const Engine = {
       const row = y * VW;
       for (let x = 0; x < VW; x++, fx += stepX, fy += stepY) {
         if (y >= wtop[x] && y < wbot[x]) continue;      // a wall is already drawn here
+        if (y >= ltop[x] && y < lbot[x]) continue;      // so is a lintel
         const cx = Math.floor(fx), cy = Math.floor(fy);
         let ci = -1;
         if (cx >= 0 && cy >= 0 && cx < lw && cy < lh) ci = cy * lw + cx;
+        if (!floor && (ci >= 0 ? level.sky[ci] === 1 : camOut)) {
+          let sv = sky.h - 1 - (p | 0);
+          if (sv < 0) sv = 0;
+          buf[row + x] = sky.data[sv * sky.w + skyU[x]];
+          continue;
+        }
         const tu = ((fx - cx) * 64) & 63;
         const tv = ((fy - cy) * 64) & 63;
         let tex, l, tr, tg, tb;
@@ -203,6 +238,44 @@ const Engine = {
     }
     vis.sort((a, b) => b.ty - a.ty);
     for (const { s, tx, ty } of vis) this.drawSprite(s, tx, ty, level, flash);
+  },
+
+  // screen position of world point (x, y) at height z in the last rendered frame, or null behind the
+  // camera; hidden = a wall in that column is nearer
+  project(x, y, z) {
+    const v = this.view;
+    if (!v) return null;
+    const vx = x - v.px, vy = y - v.py;
+    const invDet = 1 / (v.plX * v.dirY - v.dirX * v.plY);
+    const ty = invDet * (-v.plY * vx + v.plX * vy);
+    if (ty < 0.12) return null;
+    const tx = invDet * (v.dirY * vx - v.dirX * vy);
+    const sx = (VW / 2) * (1 + tx / ty);
+    const col = Math.max(0, Math.min(VW - 1, Math.floor(sx)));
+    return { x: sx, y: this.horizon + (this.eyeZ - z) * PROJ / ty, d: ty, hidden: this.zbuf[col] < ty };
+  },
+
+  // upper part of a tall facade texture between ceiling height and the facade top,
+  // at distance d (the outer face of a door cell)
+  drawLintel(x, lin, d, u, li, level, horizon, eyeZ, flash) {
+    const lt = horizon - (lin.h - eyeZ) * PROJ / d;
+    const lb = horizon - (WALL_H - eyeZ) * PROJ / d;
+    const y0 = lt < 0 ? 0 : Math.ceil(lt), y1 = lb > VH ? VH : Math.ceil(lb);
+    if (y1 <= y0) return;
+    this.ltop[x] = y0; this.lbot[x] = y1;
+    const tex = lin.tex, tw = tex.w, td = tex.data;
+    const th = Math.floor(tex.h * (lin.h - WALL_H) / lin.h);
+    let tu = Math.floor(u * tw);
+    if (tu < 0) tu = 0; else if (tu >= tw) tu = tw - 1;
+    const l = level.light[li] * this.distLight(d) * 0.84 + flash;
+    const fr = l * level.tintR[li], fg = l * level.tintG[li], fb = l * level.tintB[li];
+    const vStep = th / (lb - lt);
+    let v = (y0 + 0.5 - lt) * vStep;
+    for (let y = y0; y < y1; y++, v += vStep) {
+      let tv = v | 0;
+      if (tv >= th) tv = th - 1;
+      this.buf[y * VW + x] = shade(td[tv * tw + tu], fr, fg, fb);
+    }
   },
 
   drawSprite(s, tx, ty, level, flash) {

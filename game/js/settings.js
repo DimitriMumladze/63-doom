@@ -75,6 +75,7 @@ const SideBar = {
       btn.title = Settings.musicMuted ? 'Music off (M)' : 'Music on (M)';
     }
     Music.setVolume(Settings.musicMuted ? 0 : Settings.musicVol);
+    BossMusic.setVolume(Settings.musicMuted ? 0 : Settings.musicVol);
     Settings.save();
   },
 };
