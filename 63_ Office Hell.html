@@ -1463,18 +1463,68 @@ const Game = {
     this.kills = 0;
     this.projs = []; this.fx = []; this.msgs = []; this.vapor = [];
     this.time = 0;
-    this.player = {
-      x: L.start.x, y: L.start.y, a: L.start.a, r: 0.24,
-      hp: 100, armor: 0, ammo: { bullets: 50, shells: 0, rockets: 0, cells: 0 },
-      has: { pistol: true, shotgun: false, dbshotgun: false, chaingun: false, rifle: false, rocketl: false, plasmagun: false },
-      weapon: 'pistol', fireT: 0, shotT: 9, bob: 0, moving: false, dead: false,
-      z: 0, vz: 0, crouch: 0, pitch: 0, land: 0, kick: 0, flip: false,
-    };
+    this.player = this.newPlayer();
     this.flow = new Int16Array(L.w * L.h);
     this.computeFlow();
     this.songBoss = null;
     BossMusic.stop();
     this.say('Burdzgla St. 65. The lights are still on at 63 BITS...');
+  },
+
+  newPlayer() {
+    const L = this.L;
+    return {
+      x: L.start.x, y: L.start.y, a: L.start.a, r: 0.24, isPlayer: true,
+      hp: 100, armor: 0, ammo: { bullets: 50, shells: 0, rockets: 0, cells: 0 },
+      has: { pistol: true, shotgun: false, dbshotgun: false, chaingun: false, rifle: false, rocketl: false, plasmagun: false },
+      weapon: 'pistol', fireT: 0, shotT: 9, bob: 0, moving: false, dead: false, shots: 0,
+      z: 0, vz: 0, crouch: 0, pitch: 0, land: 0, kick: 0, flip: false,
+    };
+  },
+
+  // co-op: back at the front door with a pistol, the office stays as it is
+  respawn() {
+    this.player = this.newPlayer();
+    this.lastHitBy = null;
+    this.washR = 0;
+    for (const it of this.L.pickups) it.mine = false;
+    this.say('Back at the front door. Your coworkers are still in there.');
+  },
+
+  // you, and in online co-op the others who are in the game
+  players() { return [this.player, ...Net.active()]; },
+  livePlayers() { return this.players().filter(p => !p.dead); },
+
+  // the living player closest to e: in co-op the coworkers go for whoever is nearest
+  nearest(e, live) {
+    let best = this.player, bd = Infinity;
+    for (const p of live) {
+      const d = (p.x - e.x) ** 2 + (p.y - e.y) ** 2;
+      if (d < bd) { bd = d; best = p; }
+    }
+    return best;
+  },
+
+  hurtAny(p, dmg, src) {
+    if (p === this.player) this.hurtPlayer(dmg, src);
+    else if (p.remote && !p.dead) Net.send({ t: 'hurt', to: p.id, dmg, src: src ? this.enemies.indexOf(src) : -1 });
+  },
+
+  // world sounds and messages: the host passes them on to the others with the next snapshot
+  sound(name, vol = 1) {
+    Sound.play(name, vol);
+    if (Net.coop && Net.host) Net.out.snd.push([name, Math.round(vol * 100) / 100]);
+  },
+
+  announce(text) {
+    this.say(text);
+    if (Net.coop && Net.host) Net.out.msgs.push(text);
+  },
+
+  // a message for one player: whoever pressed the door
+  tell(p, text, snd) {
+    if (p === this.player || !p.remote) { this.say(text); if (snd) Sound.play(snd); }
+    else Net.send({ t: 'msg', to: p.id, text, snd });
   },
 
   makeEnemy(type, x, y) {
@@ -1535,12 +1585,16 @@ const Game = {
   },
 
   // BFS distance field from the player's cell; enemies walk downhill
+  // (co-op: from every living player's cell at once)
   computeFlow() {
-    const L = this.L, p = this.player, f = this.flow;
+    const L = this.L, f = this.flow;
     f.fill(-1);
-    const sx = Math.floor(p.x), sy = Math.floor(p.y);
-    const q = [sy * L.w + sx];
-    f[q[0]] = 0;
+    const q = [];
+    const live = this.livePlayers();
+    for (const p of live.length ? live : [this.player]) {
+      const i = Math.floor(p.y) * L.w + Math.floor(p.x);
+      if (i >= 0 && i < f.length && f[i] < 0) { f[i] = 0; q.push(i); }
+    }
     for (let qi = 0; qi < q.length; qi++) {
       const i = q[qi], x = i % L.w, y = (i / L.w) | 0;
       for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
@@ -1569,32 +1623,28 @@ const Game = {
     // a door that a boss's death unseals (see ENEMY_TYPES `opens`)
     const keeper = Object.values(ENEMY_TYPES).find(t => t.opens === door.key);
     if (door.locked && keeper) {
-      if (byPlayer) {
-        this.say(`${keeper.sealed} Defeat ${keeper.name} first.`);
-        Sound.play('locked');
-      }
+      if (byPlayer) this.tell(byPlayer, `${keeper.sealed} Defeat ${keeper.name} first.`, 'locked');
       return;
     }
     if (door.locked) {
       if (byPlayer) {
         const left = this.totalEnemies - this.kills - this.bossRoomCount();
         if (left > 0) {
-          this.say(`Locked. Clear the office first: ${left} coworker${left > 1 ? 's' : ''} left.`);
-          Sound.play('locked');
+          this.tell(byPlayer, `Locked. Clear the office first: ${left} coworker${left > 1 ? 's' : ''} left.`, 'locked');
           return;
         }
         door.locked = false;
-        this.say(`The boss office is open. ${ENEMY_TYPES.beard.name} is waiting.`);
+        this.announce(`The boss office is open. ${ENEMY_TYPES.beard.name} is waiting.`);
       } else return;
     }
     if (door.state === 'closed' || door.state === 'closing') {
       door.state = 'opening';
-      Sound.play('door');
+      this.sound('door');
       // the boss behind this door: his song starts the moment it opens
       const boss = this.enemies.find(e => e.t.door === door.key && e.hp > 0);
       if (boss && this.songBoss !== boss) {
         this.songBoss = boss;
-        if (boss.t.greet) this.say(boss.t.greet);
+        if (boss.t.greet) this.announce(boss.t.greet);
       }
     }
     door.timer = 4;
@@ -1609,12 +1659,13 @@ const Game = {
   // a boss (not the last one) down: full heal, his song stops and the next sealed door opens
   bossDown(e) {
     const p = this.player;
-    p.hp = 100;
+    if (!p.dead) p.hp = 100;
     this.washG = 0.5;
     Sound.play('pickup');
     if (e.t.song) BossMusic.stop();
-    this.say(`${e.t.name} is down! You are fully healed...`);
-    if (e.t.opensMsg) this.say(e.t.opensMsg);
+    Net.send({ t: 'heal' });      // everyone in co-op
+    this.announce(`${e.t.name} is down! You are fully healed...`);
+    if (e.t.opensMsg) this.announce(e.t.opensMsg);
     const rd = this.L.doors.find(d => d.key === e.t.opens);
     if (rd) rd.locked = false;
     this.computeFlow();
@@ -1628,12 +1679,12 @@ const Game = {
       } else if (d.state === 'open') {
         d.timer -= dt;
         if (d.timer <= 0) {
-          const occupied = [this.player, ...this.enemies.filter(e => e.hp > 0)]
+          const occupied = [...this.players(), ...this.enemies.filter(e => e.hp > 0)]
             .some(e => Math.floor(e.x) === d.x && Math.floor(e.y) === d.y);
-          if (!occupied) { d.state = 'closing'; Sound.play('door'); } else d.timer = 1;
+          if (!occupied) { d.state = 'closing'; this.sound('door'); } else d.timer = 1;
         }
       } else if (d.state === 'closing') {
-        const occupied = [this.player, ...this.enemies.filter(e => e.hp > 0)]
+        const occupied = [...this.players(), ...this.enemies.filter(e => e.hp > 0)]
           .some(e => Math.abs(e.x - (d.x + 0.5)) < 0.5 + e.r && Math.abs(e.y - (d.y + 0.5)) < 0.5 + e.r);
         if (occupied) { d.state = 'opening'; continue; }
         d.open = Math.max(0, d.open - dt * 1.8);
@@ -1681,9 +1732,9 @@ const Game = {
       this.move(p, mx, my);
       p.bob += dt * 9 * s;
     }
-    // push out of enemies
-    for (const e of this.enemies) {
-      if (e.hp <= 0) continue;
+    // push out of enemies (and the other players in co-op)
+    for (const e of [...this.enemies, ...Net.active()]) {
+      if (e.hp <= 0 || e.dead) continue;
       const dx = p.x - e.x, dy = p.y - e.y, d = Math.hypot(dx, dy), m = p.r + e.r;
       if (d < m && d > 0.001) this.move(p, dx / d * (m - d), dy / d * (m - d));
     }
@@ -1692,7 +1743,8 @@ const Game = {
       for (const reach of [0.8, 1.3]) {
         const cx = Math.floor(p.x + ca * reach), cy = Math.floor(p.y + sa * reach);
         const d = this.L.doorAt[cy * this.L.w + cx];
-        if (d) { this.openDoor(d, true); break; }
+        if (d && Net.guest) { Net.toHost({ t: 'use', i: this.L.doors.indexOf(d) }); break; }
+        if (d) { this.openDoor(d, p); break; }
       }
     }
     // weapon switching
@@ -1721,8 +1773,17 @@ const Game = {
     }
     // pickups
     for (const it of this.L.pickups) {
-      if (it.taken || (it.x - p.x) ** 2 + (it.y - p.y) ** 2 > 0.36) continue;
-      if (this.pickup(it.type)) { it.taken = true; Sound.play('pickup'); this.washG = 0.25; }
+      if (it.taken || it.mine || (it.x - p.x) ** 2 + (it.y - p.y) ** 2 > 0.36) continue;
+      if (!this.pickup(it.type)) continue;
+      Sound.play('pickup');
+      this.washG = 0.25;
+      // in co-op every player gets each gun once: it stays there for the others
+      if (Net.coop && WEAPONS[it.type]) { it.mine = true; continue; }
+      it.taken = true;
+      if (Net.guest) {
+        it.pendT = this.time + 1.5;       // until the host's snapshots say it's gone
+        Net.toHost({ t: 'take', i: this.L.pickups.indexOf(it) });
+      }
     }
   },
 
@@ -1739,6 +1800,7 @@ const Game = {
     p.ammo[w.ammo] -= w.use || 1;
     p.fireT = w.cool;
     p.shotT = 0;
+    p.shots++;
     p.flip = !p.flip;
     p.kick = w.kick;
     Engine.flash = w.proj === 'pplasma' ? 0.2 : 0.35;
@@ -1747,9 +1809,12 @@ const Game = {
     if (w.proj) {
       const pt = PROJ_TYPES[w.proj];
       const a = p.a + rand(-0.01, 0.01);
-      this.projs.push({ kind: w.proj, x: p.x + Math.cos(a) * 0.35, y: p.y + Math.sin(a) * 0.35,
+      const pr = { kind: w.proj, x: p.x + Math.cos(a) * 0.35, y: p.y + Math.sin(a) * 0.35,
         vx: Math.cos(a) * pt.speed, vy: Math.sin(a) * pt.speed, owner: p, t: 0,
-        dmg: randi(w.dmg[0], w.dmg[1]), splash: w.splash || 0 });
+        dmg: randi(w.dmg[0], w.dmg[1]), splash: w.splash || 0 };
+      // a guest's rockets fly in the host's world; they show up with the next snapshot
+      if (Net.guest) Net.toHost({ t: 'proj', kind: pr.kind, x: pr.x, y: pr.y, vx: pr.vx, vy: pr.vy, dmg: pr.dmg, splash: pr.splash });
+      else this.projs.push(pr);
       return;
     }
     for (let i = 0; i < w.pellets; i++) {
@@ -1763,7 +1828,7 @@ const Game = {
     const dx = Math.cos(a), dy = Math.sin(a);
     const wall = Engine.castDist(this.L, x, y, dx, dy, 40);
     let best = null, bestT = wall;
-    const targets = shooter ? [this.player] : this.enemies.filter(e => e.hp > 0);
+    const targets = shooter ? [shooter.tgt || this.player] : this.enemies.filter(e => e.hp > 0);
     for (const e of targets) {
       const ex = e.x - x, ey = e.y - y;
       const t = ex * dx + ey * dy;
@@ -1772,11 +1837,15 @@ const Game = {
       if (perp < (e.hitR || 0.3)) { best = e; bestT = t; }
     }
     const hx = x + dx * (bestT - 0.05), hy = y + dy * (bestT - 0.05);
-    if (best && best === this.player) {
-      this.hurtPlayer(dmg, shooter);
+    if (best && best.isPlayer) {
+      this.hurtAny(best, dmg, shooter);
     } else if (best) {
       this.addFx(hx, hy, 'blood', 0.75, 0.16);
-      this.hurtEnemy(best, dmg);
+      if (Net.guest) {
+        Net.toHost({ t: 'hit', e: this.enemies.indexOf(best), dmg });
+        this.target = best;
+        this.targetT = 3;
+      } else this.hurtEnemy(best, dmg);
     } else if (!shooter) {
       this.addFx(hx, hy, 'puff', rand(0.7, 1.1), 0.12);
     }
@@ -1822,31 +1891,38 @@ const Game = {
     }
   },
 
-  hurtEnemy(e, dmg) {
+  // remote: another co-op player's hit (the HUD keeps showing your own target)
+  hurtEnemy(e, dmg, remote) {
     if (e.hp <= 0) return;
     e.hp -= dmg;
-    this.target = e;
-    this.targetT = 3;
+    if (!remote) {
+      this.target = e;
+      this.targetT = 3;
+    }
     if (e.state === 'idle') this.wake(e);
     if (e.t.enrage && !e.enraged && e.hp > 0 && e.hp < e.t.hp / 2) {
       e.enraged = true;
-      this.say(`${e.t.name} is enraged!`);
+      this.announce(`${e.t.name} is enraged!`);
     }
     if (e.hp <= 0) {
       e.state = 'dying'; e.st = 0;
       this.kills++;
-      Sound.play(e.t.boss ? 'bossdie' : 'die');
-      if (e.t.final) { this.say(`${e.t.name} is down!`); BossMusic.stop(); Main.onWin(); }
-      else if (e.t.boss) this.bossDown(e);
+      this.sound(e.t.boss ? 'bossdie' : 'die');
+      if (e.t.final) {
+        this.announce(`${e.t.name} is down!`);
+        BossMusic.stop();
+        Main.onWin();
+        Net.send({ t: 'win', stats: Main.winStats });
+      } else if (e.t.boss) this.bossDown(e);
       else if (this.totalEnemies - this.kills - this.bossRoomCount() === 0) {
-        this.say('Office cleared. The boss office door is unlocked.');
+        this.announce('Office cleared. The boss office door is unlocked.');
         const bd = this.L.doors.find(d => d.locked && d.key === 'L');
         if (bd) bd.locked = false;
         this.computeFlow();
       }
     } else if (Math.random() < e.t.pain && e.state !== 'pain') {
       e.state = 'pain'; e.st = 0;
-      Sound.play('pain');
+      this.sound('pain');
     }
   },
 
@@ -1855,21 +1931,23 @@ const Game = {
     e.state = 'chase';
     e.st = 0;
     e.cool = rand(0.8, 2.2);          // reaction time before the first shot
-    Sound.play('sight');
+    this.sound('sight');
   },
 
   // ------------------------------------------------------------------
   // enemies
   // ------------------------------------------------------------------
   updateEnemies(dt) {
-    const p = this.player;
+    const players = this.livePlayers();
     for (const e of this.enemies) {
       e.st += dt;
       e.animT += dt;
+      const p = e.tgt = this.nearest(e, players);
       const dx = p.x - e.x, dy = p.y - e.y, dist = Math.hypot(dx, dy);
       switch (e.state) {
         case 'idle': {
-          const heard = this.noise > 0 && (dist < 5 || (dist < 12 && zoneAt(this.L, e.x, e.y) === zoneAt(this.L, p.x, p.y)));
+          const noise = p === this.player ? this.noise : p.noise;
+          const heard = noise > 0 && (dist < 5 || (dist < 12 && zoneAt(this.L, e.x, e.y) === zoneAt(this.L, p.x, p.y)));
           if (heard || (dist < 18 && this.sees(e.x, e.y, p.x, p.y))) this.wake(e);
           e.frame = 'idle';
           break;
@@ -1931,7 +2009,7 @@ const Game = {
   },
 
   walk(e, dt, see, dist) {
-    const p = this.player;
+    const p = e.tgt || this.player;
     let tx, ty;
     if (see && dist < 4) {
       tx = p.x; ty = p.y;
@@ -1968,11 +2046,11 @@ const Game = {
   },
 
   enemyAttack(e, dist) {
-    const p = this.player;
+    const p = e.tgt || this.player;
     const a = Math.atan2(p.y - e.y, p.x - e.x);
-    Sound.play(e.t.sound, Math.max(0.15, 1 - dist / 20));
+    this.sound(e.t.sound, Math.max(0.15, 1 - dist / 20));
     if (e.t.kind === 'melee') {
-      if (dist < e.t.range + 0.25) this.hurtPlayer(randi(e.t.dmg[0], e.t.dmg[1]), e);
+      if (dist < e.t.range + 0.25) this.hurtAny(p, randi(e.t.dmg[0], e.t.dmg[1]), e);
     } else if (e.t.kind === 'hitscan') {
       for (let i = 0; i < e.t.pellets; i++) {
         const acc = Math.min(0.7, Math.max(0.25, 0.85 - dist / 16)) * (1 - 0.25 * p.crouch);
@@ -1999,48 +2077,54 @@ const Game = {
   // projectiles + effects
   // ------------------------------------------------------------------
   updateProjs(dt) {
-    const p = this.player;
+    const players = this.livePlayers();
     for (const pr of this.projs) {
       pr.t += dt;
-      const mine = pr.owner === p;
+      const mine = !!pr.owner.isPlayer;       // any player's, in co-op too
+      const remote = pr.owner !== this.player;
       const steps = 4;
       for (let s = 0; s < steps && !pr.dead; s++) {
         pr.x += pr.vx * dt / steps;
         pr.y += pr.vy * dt / steps;
         const hitWall = this.blocked(Math.floor(pr.x), Math.floor(pr.y));
-        let hitEnemy = null;
+        let hitEnemy = null, hitPlayer = null;
         if (mine) {
           for (const e of this.enemies) {
             if (e.hp > 0 && (pr.x - e.x) ** 2 + (pr.y - e.y) ** 2 < (e.hitR + 0.1) ** 2) { hitEnemy = e; break; }
           }
+        } else {
+          // crouching ducks under fireballs and plasma (not rockets: they explode)
+          hitPlayer = players.find(p => !(p.crouch > 0.7 && pr.kind !== 'rocket')
+            && (pr.x - p.x) ** 2 + (pr.y - p.y) ** 2 < (p.r + 0.12) ** 2) || null;
         }
-        // crouching ducks under fireballs and plasma (not rockets: they explode)
-        const ducked = p.crouch > 0.7 && pr.kind !== 'rocket';
-        const hitPlayer = !mine && !p.dead && !ducked && (pr.x - p.x) ** 2 + (pr.y - p.y) ** 2 < (p.r + 0.12) ** 2;
         if (!(hitWall || hitPlayer || hitEnemy || pr.t > 6)) continue;
         pr.dead = true;
         const sp = Math.hypot(pr.vx, pr.vy);
         const back = hitWall ? 0.12 : 0;
         const ex = pr.x - pr.vx / sp * back, ey = pr.y - pr.vy / sp * back;
-        if (hitPlayer) this.hurtPlayer(pr.dmg, pr.owner);
-        if (hitEnemy) this.hurtEnemy(hitEnemy, pr.dmg);
+        if (hitPlayer) this.hurtAny(hitPlayer, pr.dmg, pr.owner);
+        if (hitEnemy) this.hurtEnemy(hitEnemy, pr.dmg, remote);
         if (pr.splash) {
-          const d = Math.hypot(p.x - ex, p.y - ey);
-          if (!hitPlayer && d < pr.splash) {
-            this.hurtPlayer(Math.round(pr.dmg * (1 - d / pr.splash) * (mine ? 0.4 : 0.8)), mine ? null : pr.owner);
+          // a player's own rocket hurts only them (no friendly fire), the coworkers' hurt everyone near
+          for (const p of mine ? [pr.owner] : players) {
+            if (p === hitPlayer || p.dead) continue;
+            const d = Math.hypot(p.x - ex, p.y - ey);
+            if (d < pr.splash) {
+              this.hurtAny(p, Math.round(pr.dmg * (1 - d / pr.splash) * (mine ? 0.4 : 0.8)), mine ? null : pr.owner);
+            }
           }
           if (mine) {
             for (const e of this.enemies) {
               if (e === hitEnemy || e.hp <= 0) continue;
               const de = Math.hypot(e.x - ex, e.y - ey);
-              if (de < pr.splash && this.sees(ex, ey, e.x, e.y)) this.hurtEnemy(e, Math.round(pr.dmg * (1 - de / pr.splash)));
+              if (de < pr.splash && this.sees(ex, ey, e.x, e.y)) this.hurtEnemy(e, Math.round(pr.dmg * (1 - de / pr.splash)), remote);
             }
           }
           Engine.flash = 0.4;
         }
         const kind = PROJ_TYPES[pr.kind].hit;
         this.addFx(ex, ey, kind, 0.6, kind === 'zap' ? 0.4 : (pr.splash ? 1.0 : 0.55));
-        Sound.play(PROJ_TYPES[pr.kind].hitSound || (kind === 'zap' ? 'zaphit' : 'explode'), 0.7);
+        this.sound(PROJ_TYPES[pr.kind].hitSound || (kind === 'zap' ? 'zaphit' : 'explode'), 0.7);
       }
     }
     this.projs = this.projs.filter(pr => !pr.dead);
@@ -2049,6 +2133,7 @@ const Game = {
   addFx(x, y, kind, lift, h) {
     const frames = { puff: 3, blood: 3, explode: 3, zap: 3 }[kind];
     this.fx.push({ x, y, kind, lift, h, t: 0, frames, dur: kind === 'explode' ? 0.36 : 0.24 });
+    if (Net.coop && Net.host) Net.out.fx.push([Math.round(x * 100) / 100, Math.round(y * 100) / 100, kind, lift, h]);
   },
 
   // the people on the street: the rider scoots up and down, the other two idle, smoke, steam and talk
@@ -2134,13 +2219,23 @@ const Game = {
 
   // ------------------------------------------------------------------
   update(dt) {
-    this.time += dt;
-    this.flowT -= dt;
-    if (this.flowT <= 0) { this.computeFlow(); this.flowT = 0.3; }
     this.updatePlayer(dt);
-    this.updateDoors(dt);
-    this.updateEnemies(dt);
-    this.updateProjs(dt);
+    this.updateWorld(dt);
+  },
+
+  // everything but your own player: runs on while you're dead (and in co-op while you're paused)
+  updateWorld(dt) {
+    this.time += dt;
+    if (Net.guest) {
+      // the host runs the coworkers, doors and projectiles; between snapshots the projectiles fly on
+      for (const pr of this.projs) { pr.x += pr.vx * dt; pr.y += pr.vy * dt; pr.t += dt; }
+    } else {
+      this.flowT -= dt;
+      if (this.flowT <= 0) { this.computeFlow(); this.flowT = 0.3; }
+      this.updateDoors(dt);
+      this.updateEnemies(dt);
+      this.updateProjs(dt);
+    }
     this.updateFx(dt);
     this.updateNpcs(dt);
     this.updateLights();
@@ -2202,7 +2297,15 @@ const Game = {
         tex: Assets.get('fx/' + v.kind + '_' + f), h, lift: v.z - h / 2 });
     }
     for (const it of this.L.pickups) {
-      if (!it.taken) out.push({ x: it.x, y: it.y, tex: it.tex, h: it.h, lift: 0 });
+      if (!it.taken && !it.mine) out.push({ x: it.x, y: it.y, tex: it.tex, h: it.h, lift: 0 });
+    }
+    // the other players in co-op: a coworker sprite in their own colour
+    for (const r of Net.active()) {
+      const frame = r.dead ? 'death4' : r.shotT < 0.15 ? 'attack2'
+        : r.moving ? ['walk1', 'walk2', 'walk3', 'walk2'][Math.floor(r.animT / 0.17) % 4] : 'idle';
+      const [tintR, tintG, tintB] = playerTint(r.slot);
+      out.push({ x: r.x, y: r.y, tex: Assets.get(PLAYER_SKIN + '/' + frame), h: 1.25 - (r.dead ? 0 : 0.3 * r.crouch),
+        lift: r.z, tintR, tintG, tintB });
     }
     for (const e of this.enemies) {
       const tex = Assets.get(e.type + '/' + e.frame);
@@ -2234,6 +2337,248 @@ function viewOf(d, p) {
 
 </script>
 <script>
+// Online co-op. The page looks for the co-op server (server.js) on port NET_PORT of the computer it was
+// loaded from, or wherever `?server=host:port` in the page address says. If it's there, the title screen
+// offers PLAY ONLINE next to PLAY ALONE. The first one in is the host: their browser runs the coworkers,
+// doors, pickups and projectiles and sends the others snapshots of it 20 times a second. The others
+// move and aim on their own screen and send the host their shots, rockets, door presses and pickups.
+// Without a server (or opened as a file) the game is single player as before.
+'use strict';
+
+const NET_PORT = 6363;
+const NET_HZ = 20;
+const PLAYER_SKIN = 'irakli';
+const PLAYER_TINTS = [[0.55, 1.35, 0.95], [0.6, 0.9, 1.6], [1.5, 1.3, 0.5], [1.5, 0.65, 1.25]];
+const PLAYER_COLORS = ['#44da9d', '#6f9dff', '#f0c040', '#ff7ad0'];
+const E_STATES = ['idle', 'chase', 'attack', 'pain', 'dying', 'dead'];
+const D_STATES = ['closed', 'opening', 'open', 'closing'];
+
+const playerTint = slot => PLAYER_TINTS[(slot - 1) % PLAYER_TINTS.length];
+const playerColor = slot => PLAYER_COLORS[(slot - 1) % PLAYER_COLORS.length];
+const r2 = v => Math.round(v * 100) / 100;
+
+const Net = {
+  ws: null, on: false, id: 0, slot: 1, hostId: 0, remotes: {}, sendT: 0, hostStarted: false,
+  lobby: null,        // { players, max, full } while the server is there and we haven't joined
+  out: { fx: [], snd: [], msgs: [] },     // the host's world events since the last snapshot
+
+  get host() { return !this.on || this.id === this.hostId; },
+  get guest() { return this.on && this.id !== this.hostId; },
+  // playing together right now (someone else is connected)
+  get coop() { return this.on && Object.keys(this.remotes).length > 0; },
+  // the others who are in the game (not on the title screen)
+  active() {
+    const out = [];
+    for (const id in this.remotes) { const r = this.remotes[id]; if (r.on && r.tx !== undefined) out.push(r); }
+    return out;
+  },
+
+  // ws://<page's computer>:6363/ws, or `?server=host:port` (or a full ws:// / wss:// address)
+  serverUrl() {
+    let s = null;
+    try { s = new URLSearchParams(location.search).get('server'); } catch (e) { /* old browser */ }
+    if (s) return /^wss?:\/\//.test(s) ? s : 'ws://' + s.replace(/\/+$/, '') + '/ws';
+    if (!location.hostname) return null;      // opened as a file
+    return (location.protocol === 'https:' ? 'wss://' : 'ws://') + location.hostname + ':' + NET_PORT + '/ws';
+  },
+
+  // connects as a watcher (the title screen shows who's playing); join() goes into the game
+  connect() {
+    const url = this.serverUrl();
+    if (!url || this.ws) return;
+    let ws;
+    try { ws = new WebSocket(url); } catch (e) { return; }
+    ws.onmessage = ev => {
+      let m;
+      try { m = JSON.parse(ev.data); } catch (e) { return; }
+      this.recv(m);
+    };
+    ws.onclose = () => {
+      const was = this.on;
+      this.ws = null; this.on = false; this.lobby = null; this.remotes = {};
+      if (was) Game.say('Lost the connection to the server. Playing alone now.');
+      // look again in a while, for as long as someone could still pick PLAY ONLINE
+      setTimeout(() => { if (Main.state === 'title') this.connect(); }, 5000);
+    };
+    this.ws = ws;
+  },
+
+  join() { this.send({ t: 'join' }); },
+
+  send(m) { if (this.ws && this.ws.readyState === 1) this.ws.send(JSON.stringify(m)); },
+  toHost(m) { m.to = this.hostId; this.send(m); },
+
+  addRemote(id, slot) {
+    this.remotes[id] = { id, slot, remote: true, isPlayer: true, r: 0.24, x: 0, y: 0, a: 0, z: 0, crouch: 0,
+      hp: 100, dead: false, on: false, moving: false, weapon: 'pistol', shots: 0, shotT: 9, animT: 0, noise: 0 };
+  },
+
+  recv(m) {
+    const G = Game, from = this.remotes[m.from];
+    switch (m.t) {
+      case 'lobby': if (!this.on) this.lobby = { players: m.players, max: m.max, full: m.players >= m.max }; break;
+      case 'full': if (this.lobby) this.lobby.full = true; Main.joining = false; break;
+      case 'welcome':
+        this.on = true; this.id = m.id; this.slot = m.slot; this.hostId = m.host; this.lobby = null;
+        for (const p of m.players) this.addRemote(p.id, p.slot);
+        break;
+      case 'join': this.addRemote(m.id, m.slot); G.say(`P${m.slot} joined the game.`); break;
+      case 'leave': {
+        const r = this.remotes[m.id];
+        delete this.remotes[m.id];
+        if (r) G.say(`P${r.slot} left the game.`);
+        break;
+      }
+      case 'host':
+        this.hostId = m.id;
+        if (m.id === this.id) this.becomeHost();
+        break;
+      case 'p': if (from) this.applyRemote(from, m); break;
+
+      // host -> guests
+      case 'snap': if (m.from === this.hostId && this.guest) this.applySnap(m); break;
+      case 'hurt':
+        if (['play', 'win', 'paused'].includes(Main.state)) G.hurtPlayer(m.dmg, G.enemies[m.src] || null);
+        break;
+      case 'heal':
+        BossMusic.stop();
+        if (!G.player.dead) { G.player.hp = 100; G.washG = 0.5; Sound.play('pickup'); }
+        break;
+      case 'msg': G.say(m.text); if (m.snd) Sound.play(m.snd); break;
+      case 'win':
+        BossMusic.stop();
+        Main.winStats = m.stats;
+        if (Main.state !== 'title') {
+          if (G.player.dead) G.respawn();
+          Main.setState('win');
+        }
+        break;
+      case 'restart':
+        if (m.from !== this.hostId) break;
+        G.start();
+        if (Main.state !== 'title') Main.setState('play');
+        break;
+
+      // guests -> host
+      case 'hit': {
+        const e = G.enemies[m.e];
+        if (this.host && e && from) G.hurtEnemy(e, m.dmg, true);
+        break;
+      }
+      case 'proj':
+        if (this.host && from && PROJ_TYPES[m.kind]) {
+          G.projs.push({ kind: m.kind, x: m.x, y: m.y, vx: m.vx, vy: m.vy, owner: from, t: 0, dmg: m.dmg, splash: m.splash || 0 });
+        }
+        break;
+      case 'use': {
+        const d = G.L.doors[m.i];
+        if (this.host && d && from) G.openDoor(d, from);
+        break;
+      }
+      case 'take': {
+        const it = G.L.pickups[m.i];
+        if (this.host && it) it.taken = true;
+        break;
+      }
+      case 'restartReq': if (this.host && Main.state === 'win') Main.restart(); break;
+    }
+  },
+
+  applyRemote(r, m) {
+    if (r.tx === undefined) { r.x = m.x; r.y = m.y; }
+    r.tx = m.x; r.ty = m.y; r.a = m.a; r.z = m.z; r.crouch = m.c; r.hp = m.hp;
+    r.dead = !!m.dead; r.moving = !!m.m; r.on = !!m.on;
+    if (WEAPONS[m.w]) r.weapon = m.w;
+    // their gun goes off: you hear it, and so do the coworkers near them
+    if (m.s > r.shots && r.on && Main.state !== 'title') {
+      r.shotT = 0;
+      r.noise = 0.2;
+      const d = Math.hypot(r.x - Game.player.x, r.y - Game.player.y);
+      Sound.play(WEAPONS[r.weapon].sound, Math.max(0.1, 1 - d / 20));
+    }
+    r.shots = m.s;
+  },
+
+  // the host's world: coworkers, doors and pickups line up by index, since everyone builds the same level
+  applySnap(m) {
+    const G = Game;
+    if (!G.L) return;
+    this.hostStarted = !!m.started;
+    m.e.forEach(([x, y, hp, st, frame, enraged], i) => {
+      const e = G.enemies[i];
+      if (!e) return;
+      e.nx = x; e.ny = y; e.hp = hp; e.state = E_STATES[st] || 'idle'; e.frame = frame; e.enraged = !!enraged;
+    });
+    m.d.forEach(([open, st, locked], i) => {
+      const d = G.L.doors[i];
+      if (!d) return;
+      d.open = open; d.state = D_STATES[st] || 'closed'; d.locked = !!locked;
+    });
+    G.L.pickups.forEach((it, i) => { it.taken = m.pk[i] === '1' || it.pendT > G.time; });
+    G.projs = m.pr.map(([kind, x, y, vx, vy, t]) => ({ kind, x, y, vx, vy, t, owner: null }));
+    G.kills = m.k;
+    G.songBoss = m.sb >= 0 ? G.enemies[m.sb] : null;
+    for (const [x, y, kind, lift, h] of m.fx) G.addFx(x, y, kind, lift, h);
+    if (Main.state !== 'title') {
+      for (const [name, vol] of m.snd) Sound.play(name, vol);
+      for (const text of m.msgs) G.say(text);
+    }
+  },
+
+  snapshot() {
+    const G = Game;
+    this.send({
+      t: 'snap', started: Main.state !== 'title',
+      e: G.enemies.map(e => [r2(e.x), r2(e.y), Math.ceil(e.hp), E_STATES.indexOf(e.state), e.frame, e.enraged ? 1 : 0]),
+      d: G.L.doors.map(d => [r2(d.open), D_STATES.indexOf(d.state), d.locked ? 1 : 0]),
+      pk: G.L.pickups.map(it => it.taken ? '1' : '0').join(''),
+      pr: G.projs.map(p => [p.kind, r2(p.x), r2(p.y), r2(p.vx), r2(p.vy), r2(p.t)]),
+      k: G.kills, sb: G.songBoss ? G.enemies.indexOf(G.songBoss) : -1,
+      fx: this.out.fx, snd: this.out.snd, msgs: this.out.msgs,
+    });
+    this.out = { fx: [], snd: [], msgs: [] };
+  },
+
+  // the host left: carry on from the last snapshot, running the world here now
+  becomeHost() {
+    const G = Game;
+    for (const e of G.enemies) if (e.nx !== undefined) { e.x = e.nx; e.y = e.ny; }
+    G.projs = [];
+    G.computeFlow();
+    G.say('The host left. Your computer runs the office now.');
+  },
+
+  // every frame, whatever the screen
+  update(dt) {
+    if (!this.on) return;
+    const G = Game, k = Math.min(1, dt * 15);
+    for (const id in this.remotes) {
+      const r = this.remotes[id];
+      r.animT += dt; r.shotT += dt; r.noise = Math.max(0, r.noise - dt);
+      if (r.tx === undefined) continue;
+      if (Math.abs(r.tx - r.x) + Math.abs(r.ty - r.y) > 3) { r.x = r.tx; r.y = r.ty; }
+      else { r.x += (r.tx - r.x) * k; r.y += (r.ty - r.y) * k; }
+    }
+    if (this.guest) {
+      for (const e of G.enemies) {
+        if (e.nx === undefined) continue;
+        if (Math.abs(e.nx - e.x) + Math.abs(e.ny - e.y) > 3) { e.x = e.nx; e.y = e.ny; }
+        else { e.x += (e.nx - e.x) * k; e.y += (e.ny - e.y) * k; }
+      }
+    }
+    this.sendT -= dt;
+    if (this.sendT > 0) return;
+    this.sendT = 1 / NET_HZ;
+    const p = G.player;
+    this.send({ t: 'p', on: Main.state !== 'title' && Main.state !== 'loading' ? 1 : 0,
+      x: r2(p.x), y: r2(p.y), a: r2(p.a), z: r2(p.z), c: r2(p.crouch), hp: Math.ceil(p.hp),
+      dead: p.dead ? 1 : 0, m: p.moving ? 1 : 0, w: p.weapon, s: p.shots });
+    if (this.host && this.coop) this.snapshot();
+  },
+};
+
+</script>
+<script>
 // Status bar, crosshair, messages and the title / death / win screens.
 'use strict';
 
@@ -2241,9 +2586,18 @@ const MINT = '#44da9d';
 const PURPLE = '#383892';
 const RED = '#e63c32';
 
+// title screen choice when the co-op server is there: [x, y, w, h, label]
+const TITLE_BUTTONS = [[VW / 2 - 106, 147, 100, 16, 'PLAY ALONE'], [VW / 2 + 6, 147, 100, 16, 'PLAY ONLINE']];
+
 const Hud = {
   // the right wording for the input in use: controller, touch screen or mouse + keyboard
   say(pad, touch, mouse) { return Input.mode === 'pad' ? pad : Input.mode === 'touch' ? touch : mouse; },
+
+  // which title button (index) is at screen point (x, y), or -1
+  titleButtonAt(x, y) {
+    if (!Net.lobby) return -1;
+    return TITLE_BUTTONS.findIndex(([bx, by, bw, bh]) => x >= bx && x < bx + bw && y >= by && y < by + bh);
+  },
 
   font(size, bold = true) {
     return `${bold ? 'bold ' : ''}${size}px "Courier New", Courier, monospace`;
@@ -2360,6 +2714,14 @@ const Hud = {
     g.globalAlpha = 1;
     const z = zoneAt(G.L, G.player.x, G.player.y);
     if (z) this.text(g, z.toUpperCase(), VW - 6, 6, 8, 'rgba(255,255,255,0.6)', 'right');
+    // co-op: a tag over each of the others, and how they're doing under the room name
+    Net.active().forEach((r, i) => {
+      const col = playerColor(r.slot);
+      this.text(g, `P${r.slot}  ${r.dead ? 'FIRED' : r.hp + '%'}`, VW - 6, 18 + i * 10, 8, col, 'right');
+      if (r.dead) return;
+      const s = Engine.project(r.x, r.y, 1.35 + r.z);
+      if (s && !s.hidden && s.x > 0 && s.x < VW) this.text(g, 'P' + r.slot, Math.round(s.x), Math.round(s.y) - 9, 8, col, 'center');
+    });
   },
 
   overlay(g, alpha, color = '0,0,0') {
@@ -2373,7 +2735,25 @@ const Hud = {
     g.drawImage(logo, VW / 2 - 40, 14, 80, 80);
     this.text(g, 'OFFICE HELL', VW / 2, 100, 30, RED, 'center');
     this.text(g, 'Your coworkers have gone wrong.', VW / 2, 134, 10, '#ddd', 'center');
-    if (Math.floor(t * 2) % 2 === 0) this.text(g, this.say('PRESS A TO START', 'TAP TO START', 'CLICK TO START'), VW / 2, 150, 14, MINT, 'center');
+    if (Main.joining) {
+      this.text(g, Net.on ? 'JOINING THE OTHERS...' : 'CONNECTING...', VW / 2, 150, 14, MINT, 'center');
+    } else if (Net.lobby) {
+      // the co-op server is there: play alone or go into the office with whoever is online
+      const lob = Net.lobby;
+      TITLE_BUTTONS.forEach(([x, y, w, h, label], i) => {
+        const sel = Main.menu === i, off = i === 1 && lob.full;
+        g.fillStyle = sel ? 'rgba(68,218,157,0.28)' : 'rgba(0,0,0,0.5)';
+        g.fillRect(x, y, w, h);
+        g.strokeStyle = sel ? MINT : '#666';
+        g.strokeRect(x + 0.5, y + 0.5, w - 1, h - 1);
+        this.text(g, label, x + w / 2, y + 4, 10, off ? '#777' : sel ? '#fff' : '#bbb', 'center');
+      });
+      const [x, y, w, h] = TITLE_BUTTONS[1];
+      const who = lob.full ? 'SERVER FULL' : lob.players ? `${lob.players} IN THE OFFICE NOW` : 'NOBODY ONLINE YET';
+      this.text(g, who, x + w / 2, y + h + 2, 8, lob.full ? RED : '#f4e7c0', 'center');
+    } else if (Math.floor(t * 2) % 2 === 0) {
+      this.text(g, this.say('PRESS A TO START', 'TAP TO START', 'CLICK TO START'), VW / 2, 150, 14, MINT, 'center');
+    }
     if (Input.padBlocked && !window.isSecureContext) {
       this.text(g, 'CONTROLLER NEEDS HTTPS', VW / 2, 162, 8, RED, 'center');
     }
@@ -2422,7 +2802,8 @@ const Hud = {
       this.text(g, `${by.t.name} got you.`, VW / 2, 160, 12, '#f4e7c0', 'center');
     }
     if (t > 1 && Math.floor(t * 2) % 2 === 0) {
-      this.text(g, this.say('PRESS A TO TRY AGAIN', 'TAP TO TRY AGAIN', 'CLICK TO TRY AGAIN'), VW / 2, 182, 12, MINT, 'center');
+      this.text(g, Net.coop ? this.say('PRESS A TO RESPAWN', 'TAP TO RESPAWN', 'CLICK TO RESPAWN')
+        : this.say('PRESS A TO TRY AGAIN', 'TAP TO TRY AGAIN', 'CLICK TO TRY AGAIN'), VW / 2, 182, 12, MINT, 'center');
     }
   },
 
@@ -2695,6 +3076,8 @@ const Input = {
 const Main = {
   canvas: null, g: null, state: 'loading', stateT: 0, last: 0, hadLock: false, winStats: null, wantFull: false,
   fps: 0, fpsAcc: 0, fpsN: 0, showFps: false,
+  menu: 0,            // title screen choice when the co-op server is there: 0 PLAY ALONE, 1 PLAY ONLINE
+  joining: false,     // PLAY ONLINE picked, waiting for the server (and the host's first snapshot)
 
   async boot() {
     const canvas = this.canvas = document.getElementById('screen');
@@ -2709,7 +3092,8 @@ const Main = {
     await Assets.load((d, n) => Hud.drawLoading(this.g, d, n));
     Game.start();
     this.setState('title');
-    canvas.addEventListener('click', () => this.onClick());
+    Net.connect();
+    canvas.addEventListener('click', e => this.onClick(e));
     // only real gestures (key, click, tap) may start audio or go fullscreen; try on every one until it works
     for (const ev of ['pointerdown', 'pointerup', 'touchend', 'keydown', 'click']) {
       window.addEventListener(ev, () => this.unlock(), true);
@@ -2729,6 +3113,14 @@ const Main = {
       });
     } catch (e) { /* file:// in some browsers */ }
     document.getElementById('restartBtn').addEventListener('click', e => { e.currentTarget.blur(); Sound.init(); this.restart(); });
+    // a hidden tab gets no animation frames, but in co-op the others still need the office (and you) in it
+    setInterval(() => {
+      if (!document.hidden || !Net.coop) return;
+      const now = performance.now(), dt = Math.min(0.05, (now - (this.last || now)) / 1000);
+      this.last = now;
+      if (this.state !== 'title' && this.state !== 'loading') Game.updateWorld(dt);
+      Net.update(dt);
+    }, 1000 / NET_HZ);
     requestAnimationFrame(t => this.loop(t));
   },
 
@@ -2767,9 +3159,15 @@ const Main = {
 
   soundBlocked() { return !!Sound.ctx && Sound.ctx.state !== 'running'; },
 
-  onClick() {
+  onClick(e) {
     Sound.init();
     SideBar.apply();
+    // on the title screen a click on PLAY ALONE / PLAY ONLINE picks it
+    if (this.state === 'title' && e) {
+      const r = this.canvas.getBoundingClientRect();
+      const b = Hud.titleButtonAt((e.clientX - r.left) * VW / r.width, (e.clientY - r.top) * SCREEN_H / r.height);
+      if (b >= 0) this.menu = b;
+    }
     if (this.state === 'title' || this.state === 'paused' || this.state === 'dead') this.advance();
     else if ((this.state === 'play' || this.state === 'win') && !Input.locked) this.lock();
   },
@@ -2778,19 +3176,42 @@ const Main = {
   advance() {
     SideBar.apply();
     if (this.state === 'title') {
-      Game.start();
-      Sound.play('start');
-      this.wantFull = Input.mode !== 'mouse';
-      this.fullscreen();
-      this.lock();
-      this.setState('play');
+      if (Net.on || this.joining) { /* already on the way into the online game */ }
+      else if (Net.lobby && this.menu === 1) {
+        if (!Net.lobby.full) this.joinOnline();
+      } else this.startGame();
     } else if (this.state === 'paused') {
       this.lock();
       this.setState('play');
     } else if (this.state === 'dead' && this.stateT > 1) {
-      this.restart();
+      // in co-op the others play on: come back in at the front door
+      if (Net.coop) {
+        Game.respawn();
+        this.setState('play');
+        this.lock();
+      } else this.restart();
     }
     Input.down = {};      // the A press that started the game must not also jump
+  },
+
+  startGame() {
+    Game.start();
+    Sound.play('start');
+    this.wantFull = Input.mode !== 'mouse';
+    this.fullscreen();
+    this.lock();
+    this.setState('play');
+  },
+
+  // PLAY ONLINE: the game starts once the server lets us in (see loop); the click is the gesture
+  // the mouse lock and fullscreen need, so ask for them now
+  joinOnline() {
+    this.joining = true;
+    this.joinT = 0;
+    Net.join();
+    this.wantFull = Input.mode !== 'mouse';
+    this.fullscreen();
+    this.lock();
   },
 
   // on a TV or a phone the browser bar wastes space; not done for mouse players.
@@ -2814,8 +3235,11 @@ const Main = {
     } catch (e) { /* not allowed without a gesture */ }
   },
 
+  // in co-op only the host restarts, for everyone; a guest asks the host
   restart() {
+    if (Net.guest) { Net.toHost({ t: 'restartReq' }); return; }
     Game.start();
+    Net.send({ t: 'restart' });
     this.setState('play');
     this.lock();
   },
@@ -2836,6 +3260,18 @@ const Main = {
     if (this.fpsAcc > 0.5) { this.fps = Math.round(this.fpsN / this.fpsAcc); this.fpsAcc = 0; this.fpsN = 0; }
     Input.pollPad();
     if (Input.pressed('F3')) this.showFps = !this.showFps;
+    if (this.state === 'title') {
+      // PLAY ALONE / PLAY ONLINE: arrows, A / D or the d-pad choose, Enter (or click, or A) goes
+      if (Input.pressed('ArrowLeft') || Input.pressed('KeyA') || Input.pressed('Pad14')) this.menu = 0;
+      if (Input.pressed('ArrowRight') || Input.pressed('KeyD') || Input.pressed('Pad15')) this.menu = 1;
+      if (Input.pressed('Enter')) this.advance();
+      if (this.joining) {
+        this.joinT += dt;
+        // in once the server says so; a guest also waits for the host's world to arrive
+        if (Net.on && (Net.host || Net.hostStarted)) { this.joining = false; this.startGame(); }
+        else if (!Net.ws || this.joinT > 10) { this.joining = false; if (Net.on) Net.ws.close(); }
+      }
+    }
     if (this.state === 'win' && (Input.pressed('KeyR') || Input.pressed('Pad8'))) this.restart();
     if (Input.pressed('Pad9')) {                       // Menu: pause / resume / start
       if (this.state === 'play') this.setState('paused');
@@ -2843,10 +3279,9 @@ const Main = {
     } else if (this.state !== 'play' && this.state !== 'win' && Input.pressed('Pad0')) this.advance();
 
     const g = this.g, p = Game.player;
-    if (this.state === 'play' || this.state === 'dead' || this.state === 'win') {
-      if (this.state === 'play' || this.state === 'win') Game.update(dt);
-      else { Game.updateEnemies(dt); Game.updateProjs(dt); Game.updateFx(dt); Game.updateNpcs(dt); Game.updateDoors(dt); Game.time += dt; }
-    }
+    if (this.state === 'play' || this.state === 'win') Game.update(dt);
+    else if (this.state === 'dead' || (this.state === 'paused' && Net.coop)) Game.updateWorld(dt);
+    Net.update(dt);
     // camera: title screen slowly drifts along the street in front of the office
     // eye height: crouch lowers it, jumping raises it, landing dips it
     let cam = { x: p.x, y: p.y, a: p.a, horizon: CY + p.pitch + p.kick * 0.25,
