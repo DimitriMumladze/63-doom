@@ -1,6 +1,9 @@
 // Level building: a grid of wall letters + lighting zones + placed things, flattened
 // into the flat typed arrays the renderer and the gameplay code read.
 //
+// The geometry half -- what is solid, and how far a shot flies -- is in collide.js,
+// which server.js shares. This file is the part that needs textures and lighting.
+//
 // A level *spec* is plain data -- { name, rows, zones, things } -- and lives in
 // game/js/maps/. buildLevel(spec) turns one into a runtime level. See maps/office.js
 // for the letter legend; the tables below say what each letter and thing type means.
@@ -27,8 +30,6 @@ const FACADE_H = { X: 6, Y: 6, J: 6 };
 const WALL_STRIPS = { N: 'dino', A: 'stairs', Q: 'sign63', I: 'portrait' };
 // strips on a south wall are seen looking south, where east is on the left, so they count from the east
 const STRIPS_FROM_EAST = { I: true };
-
-const DOOR_KEYS = 'DEFLUu';
 
 function stripIndex(rows, x, y, ch) {
   let n = 0;
@@ -62,6 +63,16 @@ const DECOR = {
   russian_flag: { h: 1.8, r: 0.12 }, throne: { h: 1.3, r: 0.35 },
 };
 
+// collide.js carries its own copy of which props fill whole cells, because the
+// server cannot see DECOR. Shout at load time if the two ever drift apart.
+for (const [type, d] of Object.entries(DECOR)) {
+  const want = d.solid === 'cell' ? 1 : (d.cells || 0);
+  if ((BLOCKING[type] || 0) !== want) console.error('BLOCKING disagrees with DECOR for', type);
+}
+for (const type in BLOCKING) {
+  if (!DECOR[type]) console.error('BLOCKING names a prop DECOR has never heard of:', type);
+}
+
 // friendly people: not enemies, can't be shot, the player bumps into them.
 // frames cycle on `beats` (seconds per frame); `line` shows in a speech box when you come within talkR;
 // `dirs` + `path` = rides back and forth along x between path[0] and path[1]
@@ -89,9 +100,12 @@ function buildLevel(spec) {
   }
   const def = Object.assign({}, DEFAULTS, spec.defaults);
   const N = w * h;
+  // what is solid, and where people and loot start: the server works this out from
+  // the same spec with the same code, so the two cannot disagree
+  const C = buildCollision(spec);
   const L = {
-    name: spec.name || '', w, h,
-    solid: new Uint8Array(N), block: new Uint8Array(N),
+    name: spec.name || '', w, h, C,
+    solid: C.solid, block: C.block,
     wallTex: new Array(N).fill(null), doorAt: new Array(N).fill(null), doors: [],
     wallTexIn: new Array(N).fill(null), wallH: new Float32Array(N).fill(WALL_H), lintel: new Array(N).fill(null),
     sky: new Uint8Array(N), skyTex: Assets.get('tex/' + def.sky),
@@ -102,7 +116,7 @@ function buildLevel(spec) {
     defWall: Assets.get('tex/' + def.wall), defFloor: Assets.get('tex/' + def.floor),
     defCeil: Assets.get('tex/' + def.ceil),
     decor: [], decorAt: new Array(N).fill(null), pickups: [], spawns: [], npcs: [],
-    start: { x: 2, y: 7, a: 0 }, starts: [],
+    start: { x: 2, y: 7, a: 0 }, starts: C.spawns,
     // how far props stay in the sprite list; unset means "no limit" (small maps)
     cull: spec.cull || 0,
   };
@@ -118,7 +132,6 @@ function buildLevel(spec) {
     for (let x = 0; x < w; x++) {
       const ch = rows[y][x], i = y * w + x;
       if (ch === '.') continue;
-      L.solid[i] = 1;
       if (ch === 'M') {
         L.wallTex[i] = Assets.get('tex/mural_' + String((x - 1) % 12).padStart(2, '0'));
       } else if (WALL_STRIPS[ch]) {
@@ -134,7 +147,7 @@ function buildLevel(spec) {
         L.wallTexIn[i] = Assets.get('tex/plaster_grey');
       }
       if (ch === 'F') L.lintel[i] = { tex: Assets.get('tex/facade_glass'), h: FACADE_H.Y };
-      if (DOOR_KEYS.includes(ch)) {
+      if (DOOR_CHARS.includes(ch)) {
         const horiz = x > 0 && x < w - 1 && rows[y][x - 1] !== '.' && rows[y][x + 1] !== '.';
         const door = { x, y, i, key: ch, orient: horiz ? 'h' : 'v', open: 0, state: 'closed', timer: 0,
           locked: ch === 'L' || ch === 'U' || ch === 'u' };
@@ -172,15 +185,14 @@ function buildLevel(spec) {
   L.light.set(L.baseLight);
 
   for (const [type, x, y, a] of spec.things) {
-    if (type === 'start') { L.start = { x, y, a }; L.starts.push({ x, y, a }); continue; }
+    if (type === 'start' || type === 'brspawn') { L.start = { x, y, a }; continue; }
+    if (type === 'loot') continue;              // battle royale loot spots: see C.loot
     if (DECOR[type]) {
       const d = DECOR[type];
+      // cell-filling props sit at the centre of their cell; buildCollision already
+      // marked the cells themselves as blocked
       let px = x, py = y;
-      if (d.solid === 'cell') { px = x + 0.5; py = y + 0.5; L.block[y * w + x] = 1; }
-      if (d.cells) {
-        const ox = Math.round(Math.cos(a)), oy = Math.round(Math.sin(a)), k0 = (d.cells - 1) / 2;
-        for (let k = -k0; k <= k0; k++) L.block[(Math.floor(y) + k * oy) * w + Math.floor(x) + k * ox] = 1;
-      }
+      if (d.solid === 'cell') { px = x + 0.5; py = y + 0.5; }
       L.decor.push({ type, x: px, y: py, h: d.h, lift: d.lift || 0, r: d.r || 0, anim: d.anim,
         dirs: d.dirs, facing: a || 0,
         bright: d.bright, tex: Assets.get('prop/' + (d.dirs ? d.dirs[0] : (d.anim ? d.anim[0] : type))) });
@@ -226,45 +238,4 @@ function zoneAt(L, x, y) {
   const cx = Math.floor(x), cy = Math.floor(y);
   if (cx < 0 || cy < 0 || cx >= L.w || cy >= L.h) return '';
   return L.zone[cy * L.w + cx];
-}
-
-// ----------------------------------------------------------------------
-// Composing a big map out of blocks (see maps/block.js). A grid is an array of
-// char arrays; gridRows() turns it back into the strings buildLevel() wants.
-// ----------------------------------------------------------------------
-function mapGrid(w, h, ch = '.') {
-  return Array.from({ length: h }, () => new Array(w).fill(ch));
-}
-
-// Draw `rows` into G with its top-left at (x0, y0). A space in `rows` means
-// "leave what is already there", so blocks can be any shape.
-function stamp(G, x0, y0, rows) {
-  for (let y = 0; y < rows.length; y++) {
-    const row = rows[y], gy = y0 + y;
-    if (gy < 0 || gy >= G.length) continue;
-    for (let x = 0; x < row.length; x++) {
-      const gx = x0 + x;
-      if (gx < 0 || gx >= G[gy].length || row[x] === ' ') continue;
-      G[gy][gx] = row[x];
-    }
-  }
-}
-
-function rect(G, x0, y0, x1, y1, ch) {
-  for (let x = x0; x <= x1; x++) { G[y0][x] = ch; G[y1][x] = ch; }
-  for (let y = y0; y <= y1; y++) { G[y][x0] = ch; G[y][x1] = ch; }
-}
-
-function fillRect(G, x0, y0, x1, y1, ch) {
-  for (let y = y0; y <= y1; y++) for (let x = x0; x <= x1; x++) G[y][x] = ch;
-}
-
-function border(G, ch) { rect(G, 0, 0, G[0].length - 1, G.length - 1, ch); }
-
-function gridRows(G) { return G.map(r => r.join('')); }
-
-// Shift every [type, x, y, a] of a block's things by (dx, dy), for stamping a
-// place's contents alongside its walls.
-function offsetThings(things, dx, dy) {
-  return things.map(t => [t[0], t[1] + dx, t[2] + dy, ...t.slice(3)]);
 }

@@ -6,8 +6,8 @@ const VW = 480;           // 3D view width (internal pixels)
 const VH = 230;           // 3D view height; the HUD bar sits below
 const SCREEN_H = 270;
 const CY = VH / 2;
-const WALL_H = 2.0;
 const EYE = 1.0;          // eye height; equals WALL_H - EYE so floor/ceiling rows mirror
+                          // (WALL_H lives in collide.js, which the server shares)
 const FOV = 66 * Math.PI / 180;
 const PLANE = Math.tan(FOV / 2);
 const PROJ = (VW / 2) / PLANE;
