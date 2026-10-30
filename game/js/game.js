@@ -67,7 +67,7 @@ const Game = {
   target: null, targetT: 0,
 
   start() {
-    const L = this.L = buildLevel();
+    const L = this.L = buildLevel(OFFICE_MAP);
     this.enemies = L.spawns.map(s => this.makeEnemy(s.type, s.x, s.y));
     this.totalEnemies = this.enemies.length;
     this.kills = 0;
@@ -168,19 +168,25 @@ const Game = {
 
   // circle vs blocked cells; extra = list of {x,y,r} circles (props)
   free(x, y, r, self) {
+    const L = this.L;
     const x0 = Math.floor(x - r), x1 = Math.floor(x + r), y0 = Math.floor(y - r), y1 = Math.floor(y + r);
     for (let cy = y0; cy <= y1; cy++) {
       for (let cx = x0; cx <= x1; cx++) {
-        if (!this.blocked(cx, cy)) continue;
-        const nx = Math.max(cx, Math.min(x, cx + 1)), ny = Math.max(cy, Math.min(y, cy + 1));
-        if ((nx - x) ** 2 + (ny - y) ** 2 < r * r) return false;
+        if (this.blocked(cx, cy)) {
+          const nx = Math.max(cx, Math.min(x, cx + 1)), ny = Math.max(cy, Math.min(y, cy + 1));
+          if ((nx - x) ** 2 + (ny - y) ** 2 < r * r) return false;
+        }
+        // props you bump into, bucketed per cell by indexDecor() so a big map does
+        // not cost a walk of the whole prop list on every one of these calls
+        if (cx < 0 || cy < 0 || cx >= L.w || cy >= L.h) continue;
+        const here = L.decorAt[cy * L.w + cx];
+        if (!here) continue;
+        for (const d of here) {
+          if ((d.x - x) ** 2 + (d.y - y) ** 2 < (d.r + r) ** 2) return false;
+        }
       }
     }
-    for (const d of this.L.decor) {
-      if (!d.r) continue;
-      if ((d.x - x) ** 2 + (d.y - y) ** 2 < (d.r + r) ** 2) return false;
-    }
-    for (const n of this.L.npcs) {
+    for (const n of L.npcs) {
       if (n === self) continue;
       if ((n.x - x) ** 2 + (n.y - y) ** 2 < (n.r + r) ** 2) return false;
     }
@@ -885,7 +891,11 @@ const Game = {
     const out = [];
     const t = this.time;
     const p = this.player;
+    // on a big map most props are far out of sight; L.cull (unset in the campaign,
+    // where everything is close) keeps them out of the list entirely
+    const cull2 = this.L.cull ? this.L.cull * this.L.cull : Infinity;
     for (const d of this.L.decor) {
+      if ((d.x - p.x) ** 2 + (d.y - p.y) ** 2 > cull2) continue;
       let tex = d.anim ? Assets.get('prop/' + d.anim[Math.floor(t * 8) % d.anim.length]) : d.tex;
       if (d.anim && Math.sin(t * 3 + d.x) < -0.3) continue;   // sparks come and go
       let flip = false;
@@ -918,7 +928,9 @@ const Game = {
         tex: Assets.get('fx/' + v.kind + '_' + f), h, lift: v.z - h / 2 });
     }
     for (const it of this.L.pickups) {
-      if (!it.taken && !it.mine) out.push({ x: it.x, y: it.y, tex: it.tex, h: it.h, lift: 0 });
+      if (it.taken || it.mine) continue;
+      if ((it.x - p.x) ** 2 + (it.y - p.y) ** 2 > cull2) continue;
+      out.push({ x: it.x, y: it.y, tex: it.tex, h: it.h, lift: 0 });
     }
     // the other players in co-op: a coworker sprite in their own colour
     for (const r of Net.active()) {
