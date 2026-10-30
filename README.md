@@ -6,11 +6,18 @@ Open `63_ Office Hell.html` in a browser to play alone. It's live at http://31.9
 
 ```
 63_ Office Hell.html   the game: one self-contained file, built by tools/bundle.py
-server.js              optional co-op server (see below)
+server.js              optional server: co-op relay + battle royale referee (see below)
 game/                  the source -- index.html + js/*.js
+  js/collide.js          level geometry, shared with server.js
+  js/weapons.js          the guns, shared with server.js
+  js/maps/               level data: office.js (campaign), yard.js (battle royale)
+  js/mode.js             the two sets of rules, behind Game.mode
 assets/                art, music and the Georgian pixel font, embedded at build time
-tools/                 asset generators, bundle.py, unbundle.py, deploy.sh
+tools/                 asset generators, bundle.py, unbundle.py, deploy.sh, the tests
 ```
+
+There are two games in here. The campaign is the office gone wrong, alone or in co-op.
+The battle royale is up to fifteen people in the yard with a closing ring; see below.
 
 ## Building
 
@@ -47,6 +54,27 @@ py tools/unbundle.py            # or: py tools/unbundle.py some-other-build.html
 
 Then rebuild and confirm you get the same file back.
 
+## Tests
+
+None of them need a browser, and all of them are plain `node`:
+
+```
+node tools/smoke.js        plays the campaign for a simulated minute
+node tools/drawtest.js     draws every screen once against a recording canvas
+node tools/checkmap.js [yard|office] [--ascii]    checks a map spec
+node tools/botclient.js 15                        fills a match with bots
+node tools/headless.js 8                          plays a match with real clients
+```
+
+`smoke.js` and `drawtest.js` are the regression tests: between them they run the real
+engine, level, mode, game, net and hud modules, so a rename or a missing asset key turns
+up there instead of as a black screen.
+
+The two match tests need `node server.js` running. `botclient.js` tests the server by
+speaking its protocol; `headless.js` tests the client by *being* one -- it loads the
+actual client modules and plays through the lobby, the drop, firing, the ring, dying,
+spectating and the scoreboard.
+
 ## Art pipeline
 
 The scripts in `tools/` generate the PNGs in `assets/`: `heads.py` and `bodies.py` build the
@@ -58,16 +86,30 @@ The full-resolution source photographs of the crew live in `assets/source/` and 
 committed -- this repo is public and the bundler never reads them. Get them from whoever
 generated the sprites if you need to re-run the character scripts.
 
-## Online co-op
+## Online
 
-When the co-op server (`server.js`) runs on the same computer as the website, the title screen
-offers **PLAY ALONE** or **PLAY ONLINE**. It shows how many people are in the online game right now.
-Without the server, the game is single player as before.
+When `server.js` runs on the same computer as the website, the title screen offers
+**PLAY ALONE**, **PLAY ONLINE** (co-op) and **BATTLE ROYALE**, and shows how many people
+are in each right now. Without the server, the game is single player as before.
+
+The two are different arrangements, because they want different things:
+
+- **co-op** is peer to peer through a relay. The first player in is the host and runs the
+  world in their browser; the server only passes messages on. Up to 8.
+- **battle royale** is server-authoritative. The server owns who is alive, who shot whom,
+  where the ring is and who won. Up to 15.
 
 ### Running the server on the web server
 
+`bash tools/deploy.sh --server` does the uploading part of this.
+
 1. Put `server.js` anywhere on the server, for example `/opt/officehell/server.js`. It needs
    Node.js 16 or newer (`node -v`) and nothing else.
+
+   For the battle royale it also needs the rules it shares with the game, in the same layout
+   next to it: `game/js/collide.js`, `game/js/weapons.js` and `game/js/maps/yard.js`. There is
+   one copy of "is that solid" and "how fast does a shotgun fire", and both sides read it.
+   Without those three files the server starts anyway, says so, and offers co-op only.
 2. Let players reach port 6363:
 
    ```
@@ -124,3 +166,25 @@ Windows may ask to let Node through the firewall: allow it on private networks.
 - Once the last boss is down, only the host can restart (`R`). A guest pressing `R` asks the host to restart.
 - Pausing doesn't stop the game for the others, and your player stays in the office while you're paused.
 - Up to 8 players. Another port: `PORT=7000 node server.js`. The page also needs `?server=<address>:7000`.
+
+### How the battle royale works
+
+- **The lobby.** Pick which colleague you are -- there are nine, and the server hands out the
+  spare ones first so two people are not the same person while there is a choice -- and ready
+  up. The match starts once everyone is ready, or after a minute and a half regardless. Two
+  people minimum, fifteen maximum. Turn up mid-match and you watch until the next one.
+- **The drop.** No parachute: there is one floor in a raycaster. The lift doors open on a
+  spawn point chosen to be as far from everybody else as the map allows, and you cannot move
+  or be shot for the first two and a half seconds.
+- **The ring** is the building's fire-suppression system venting the yard a section at a time.
+  Seven phases, each sitting still and then closing on a new circle drawn inside the old one.
+  Outside it you lose 1 health a second at first and 18 by the end, and body armour is no help
+  against gas. It shows up as a curtain of drifting static, and on the minimap as two circles:
+  where it is, and where it is going.
+- **Shooting.** Your browser works out what you hit, because it has the geometry and the pellet
+  spread. The server rolls the damage, and throws the shot away if the gun fired faster than it
+  can, if the range is too far, or if there was a wall in the way. It rewinds everyone half a
+  round trip, so shooting at where you saw someone hits.
+- **Dying** is final -- no respawn. You get your placing, and then watch whoever is still
+  standing until the match ends. The last one left is employee of the month.
+- Everyone starts with the same shotgun for now; loot is the next thing.
