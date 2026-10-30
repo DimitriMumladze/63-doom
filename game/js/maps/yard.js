@@ -98,6 +98,9 @@ const YARD_MAP_SPEC = {
   things: YARD_THINGS,
   cull: 34,                      // props past this are not worth putting in the sprite list
   defaults: { wall: 'concrete', floor: 'asphalt', ceil: 'ceil_concrete', sky: 'sky_dusk' },
+  // you have to be able to see across a yard this size, and tell forty cells from
+  // seventy; the campaign's falloff bottoms out at fifteen
+  lighting: { lightRange: 48, lightFloor: 0.34, fogNear: 12, fogFar: 56, fogMax: 0.88 },
 };
 
 if (typeof module !== 'undefined' && module.exports) module.exports = { YARD_MAP_SPEC };

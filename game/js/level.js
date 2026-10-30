@@ -93,12 +93,30 @@ const PICKUPS = {
 
 const DEFAULTS = { wall: 'concrete', floor: 'floor_oak', ceil: 'ceil_concrete', sky: 'sky_dusk' };
 
+// How light falls off with distance, and what distance fades into.
+//
+// The campaign's numbers are what the renderer used to have hardcoded: full
+// brightness close up, down to a fifth of it by fifteen cells, and no fog, because
+// nothing in a 42x43 office is further away than that. A big outdoor map needs the
+// other set -- with range 15 everything past about fifteen cells is the same shade
+// of dark, so the far side of a 96-cell yard reads as a flat black wall.
+const LIGHTING = {
+  lightRange: 15,       // cells over which light drops from 1.25 to the floor
+  lightFloor: 0.22,     // never darker than this for distance alone
+  fogNear: 0,           // where fog starts; 0 with fogFar 0 means none at all
+  fogFar: 0,
+  fogMax: 1,            // how completely the far distance turns to fog
+  fogSky: [116, 104, 126],    // out of doors: the dusk haze the sky panorama sits in
+  fogDark: [14, 13, 18],      // indoors: it just goes dark
+};
+
 function buildLevel(spec) {
   const rows = spec.rows, h = rows.length, w = rows[0].length;
   for (let y = 0; y < h; y++) {
     if (rows[y].length !== w) console.error('map row', y, 'has length', rows[y].length);
   }
   const def = Object.assign({}, DEFAULTS, spec.defaults);
+  const lit = Object.assign({}, LIGHTING, spec.lighting);
   const N = w * h;
   // what is solid, and where people and loot start: the server works this out from
   // the same spec with the same code, so the two cannot disagree
@@ -119,6 +137,9 @@ function buildLevel(spec) {
     start: { x: 2, y: 7, a: 0 }, starts: C.spawns,
     // how far props stay in the sprite list; unset means "no limit" (small maps)
     cull: spec.cull || 0,
+    lightRange: lit.lightRange, lightFloor: lit.lightFloor,
+    fogNear: lit.fogNear, fogFar: lit.fogFar, fogMax: lit.fogMax,
+    fogSky: lit.fogSky, fogDark: lit.fogDark,
   };
   Assets.get('tex/ceil_light').bright = true;
   Assets.get('tex/ceil_linear').bright = true;
