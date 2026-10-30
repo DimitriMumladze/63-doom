@@ -59,7 +59,9 @@ Windows may ask to let Node through the firewall: allow it on private networks.
 
 - The first player in is the host: their browser runs the coworkers, doors and pickups, and the
   others play in the host's world. If the host leaves, the next player takes over and the game goes on.
-- Coworkers go for whoever is nearest. No friendly fire.
+- Coworkers go for whoever is nearest.
+- Friendly fire is on: your bullets, plasma and rockets hurt the other players, and rocket blasts
+  hurt everyone near (you too) at 40%. The death screen says which player got you.
 - Each player can pick up every gun once; ammo, health and armor are first come, first served.
 - Killing a boss heals everyone.
 - If you die, click to respawn at the front door with a pistol. The office stays as it is.

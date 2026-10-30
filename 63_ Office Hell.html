@@ -1505,9 +1505,13 @@ const Game = {
     return best;
   },
 
+  // src: the coworker who did it, or another player (friendly fire), or null
   hurtAny(p, dmg, src) {
-    if (p === this.player) this.hurtPlayer(dmg, src);
-    else if (p.remote && !p.dead) Net.send({ t: 'hurt', to: p.id, dmg, src: src ? this.enemies.indexOf(src) : -1 });
+    const by = src && src.isPlayer ? (src === this.player ? Net.slot : src.slot) : 0;
+    if (p === this.player) this.hurtPlayer(dmg, by ? { friendly: true, slot: by } : src);
+    else if (p.remote && !p.dead) {
+      Net.send({ t: 'hurt', to: p.id, dmg, src: src && !by ? this.enemies.indexOf(src) : -1, by });
+    }
   },
 
   // world sounds and messages: the host passes them on to the others with the next snapshot
@@ -1823,12 +1827,14 @@ const Game = {
     }
   },
 
-  // ray from (x, y) at angle a; hits the closest enemy (or the player) before a wall
+  // ray from (x, y) at angle a; hits the closest enemy (or the player) before a wall.
+  // Your own shots (shooter null) also hit the other players in co-op: friendly fire
   hitscan(x, y, a, dmg, shooter) {
     const dx = Math.cos(a), dy = Math.sin(a);
     const wall = Engine.castDist(this.L, x, y, dx, dy, 40);
     let best = null, bestT = wall;
-    const targets = shooter ? [shooter.tgt || this.player] : this.enemies.filter(e => e.hp > 0);
+    const targets = shooter ? [shooter.tgt || this.player]
+      : [...this.enemies.filter(e => e.hp > 0), ...Net.active().filter(r => !r.dead)];
     for (const e of targets) {
       const ex = e.x - x, ey = e.y - y;
       const t = ex * dx + ey * dy;
@@ -1838,7 +1844,8 @@ const Game = {
     }
     const hx = x + dx * (bestT - 0.05), hy = y + dy * (bestT - 0.05);
     if (best && best.isPlayer) {
-      this.hurtAny(best, dmg, shooter);
+      if (!shooter) this.addFx(hx, hy, 'blood', 0.75, 0.16);
+      this.hurtAny(best, dmg, shooter || this.player);
     } else if (best) {
       this.addFx(hx, hy, 'blood', 0.75, 0.16);
       if (Net.guest) {
@@ -2092,6 +2099,10 @@ const Game = {
           for (const e of this.enemies) {
             if (e.hp > 0 && (pr.x - e.x) ** 2 + (pr.y - e.y) ** 2 < (e.hitR + 0.1) ** 2) { hitEnemy = e; break; }
           }
+          // friendly fire: a player's rockets and plasma hit the other players too
+          if (!hitEnemy) {
+            hitPlayer = players.find(p => p !== pr.owner && (pr.x - p.x) ** 2 + (pr.y - p.y) ** 2 < (p.r + 0.12) ** 2) || null;
+          }
         } else {
           // crouching ducks under fireballs and plasma (not rockets: they explode)
           hitPlayer = players.find(p => !(p.crouch > 0.7 && pr.kind !== 'rocket')
@@ -2105,12 +2116,12 @@ const Game = {
         if (hitPlayer) this.hurtAny(hitPlayer, pr.dmg, pr.owner);
         if (hitEnemy) this.hurtEnemy(hitEnemy, pr.dmg, remote);
         if (pr.splash) {
-          // a player's own rocket hurts only them (no friendly fire), the coworkers' hurt everyone near
-          for (const p of mine ? [pr.owner] : players) {
+          // the blast hurts every player near: a player's rocket at 40% (the shooter too), the coworkers' at 80%
+          for (const p of players) {
             if (p === hitPlayer || p.dead) continue;
             const d = Math.hypot(p.x - ex, p.y - ey);
             if (d < pr.splash) {
-              this.hurtAny(p, Math.round(pr.dmg * (1 - d / pr.splash) * (mine ? 0.4 : 0.8)), mine ? null : pr.owner);
+              this.hurtAny(p, Math.round(pr.dmg * (1 - d / pr.splash) * (mine ? 0.4 : 0.8)), p === pr.owner ? null : pr.owner);
             }
           }
           if (mine) {
@@ -2409,7 +2420,7 @@ const Net = {
   toHost(m) { m.to = this.hostId; this.send(m); },
 
   addRemote(id, slot) {
-    this.remotes[id] = { id, slot, remote: true, isPlayer: true, r: 0.24, x: 0, y: 0, a: 0, z: 0, crouch: 0,
+    this.remotes[id] = { id, slot, remote: true, isPlayer: true, r: 0.24, hitR: 0.3, x: 0, y: 0, a: 0, z: 0, crouch: 0,
       hp: 100, dead: false, on: false, moving: false, weapon: 'pistol', shots: 0, shotT: 9, animT: 0, noise: 0 };
   },
 
@@ -2438,7 +2449,9 @@ const Net = {
       // host -> guests
       case 'snap': if (m.from === this.hostId && this.guest) this.applySnap(m); break;
       case 'hurt':
-        if (['play', 'win', 'paused'].includes(Main.state)) G.hurtPlayer(m.dmg, G.enemies[m.src] || null);
+        if (['play', 'win', 'paused'].includes(Main.state)) {
+          G.hurtPlayer(m.dmg, m.by ? { friendly: true, slot: m.by } : G.enemies[m.src] || null);
+        }
         break;
       case 'heal':
         BossMusic.stop();
@@ -2797,7 +2810,10 @@ const Hud = {
     this.overlay(g, Math.min(0.55, t * 0.6), '120,0,0');
     this.text(g, "YOU'RE FIRED!", VW / 2, 70, 30, '#fff', 'center');
     const by = Game.lastHitBy;
-    if (by) {
+    if (by && by.friendly) {
+      this.text(g, `P${by.slot} got you.`, VW / 2, 118, 16, playerColor(by.slot), 'center');
+      this.text(g, 'FRIENDLY FIRE!', VW / 2, 140, 12, '#f4e7c0', 'center');
+    } else if (by) {
       g.drawImage(Assets.get(by.type + '/face').img, VW / 2 - 24, 108, 48, 48);
       this.text(g, `${by.t.name} got you.`, VW / 2, 160, 12, '#f4e7c0', 'center');
     }
