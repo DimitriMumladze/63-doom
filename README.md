@@ -20,10 +20,16 @@ tools/                 asset generators, bundle.py, unbundle.py, deploy.sh
 py tools/bundle.py
 ```
 
-That inlines `game/js/*.js` and embeds all 274 files under `assets/` as data URIs, so the
+That inlines `game/js/*.js` and embeds everything under `assets/` as data URIs, so the
 result opens straight from disk with no server and no loose files. The build is
 deterministic -- same source in, byte-identical file out -- so a rebuild with no source
 changes leaves git clean. `bash tools/deploy.sh` rebuilds and uploads in one step.
+
+The one exception is the boss music. The two tracks are 5.3 MB of the 7.5 MB of art, and
+embedding them made a 10 MB page out of a 3 MB one for two songs most players never reach,
+so they are *linked* instead (`LINKED` in `tools/bundle.py`) and loaded from `assets/music/`
+next to the page. `deploy.sh` uploads them with it. Opened straight from disk the game plays
+exactly as before except that those two songs are silent.
 
 Unbundled, `game/index.html` runs too: it loads the same assets from `../assets/` instead
 of from `window.EMBED`. Handy for debugging, since you get real filenames and line numbers.

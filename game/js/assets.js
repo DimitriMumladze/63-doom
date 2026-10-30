@@ -2,7 +2,13 @@
 // In the bundled single-file build, window.EMBED maps each path to a data URI.
 'use strict';
 
-const ASSET_BASE = '../assets/';
+// Where an asset comes from. The bundled single file carries most of them as data
+// URIs in window.EMBED; what is left out of the embed (the boss music, which is the
+// bulk of the bytes) sits in assets/ next to the page. Unbundled, game/index.html
+// loads everything from ../assets/.
+const BUNDLED = typeof window !== 'undefined' && !!window.EMBED;
+const ASSET_BASE = BUNDLED ? 'assets/' : '../assets/';
+const assetUrl = path => (BUNDLED && window.EMBED[path]) || (ASSET_BASE + path);
 
 const CREW = ['brute', 'tank', 'irakli', 'beard', 'rider', 'sandro', 'agamemnov'];
 const STAND_FRAMES = ['idle', 'walk1', 'walk2', 'walk3', 'attack1', 'attack2', 'pain',
@@ -78,15 +84,14 @@ const Assets = {
         resolve();
       };
       im.onerror = () => reject(new Error('missing asset ' + path));
-      im.src = (window.EMBED && window.EMBED[path]) || (ASSET_BASE + path);
+      im.src = assetUrl(path);
     }))]);
   },
 
   // GeoPixel (Georgian pixel font) for the speech boxes; without it they fall back to the HUD font
   loadFont() {
     if (!window.FontFace || !document.fonts) return Promise.resolve();
-    const path = 'fonts/geopixel.ttf';
-    const src = (window.EMBED && window.EMBED[path]) || (ASSET_BASE + path);
+    const src = assetUrl('fonts/geopixel.ttf');
     return new FontFace('GeoPixel', 'url(' + src + ')').load()
       .then(f => { document.fonts.add(f); })
       .catch(err => console.warn('GeoPixel font not loaded', err));

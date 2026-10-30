@@ -20,6 +20,9 @@ ROOT = Path(__file__).resolve().parent.parent
 GAME = ROOT / "game"
 ASSETS = ROOT / "assets"
 
+# Assets bundle.py links instead of embedding (see its LINKED) are not in a build and
+# so cannot be recovered from one; they live in the repo under assets/.
+#
 # The inlined <script> blocks, in the order bundle.py emits them (EMBED is handled apart).
 MODULES = ["assets", "engine", "level", "maps/office", "audio", "settings", "game", "net",
            "hud", "main"]

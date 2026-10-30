@@ -251,10 +251,11 @@ const BossMusic = {
   tracks: {}, el: null, cur: null, on: false, vol: 0.6, fadeTimer: null,
 
   init() {
-    if (!window.EMBED) return;
     for (const key of this.SONGS) {
-      if (this.tracks[key] || !window.EMBED[key]) continue;
-      const el = this.tracks[key] = new Audio(window.EMBED[key]);
+      if (this.tracks[key]) continue;
+      // streamed from assets/music/ unless the build embedded it; either way the
+      // game loop retries play() every frame, so it starts as soon as it can
+      const el = this.tracks[key] = new Audio(assetUrl(key));
       el.loop = true;
       el.volume = 0;
       // init runs inside a click: start and pause the element now so the game loop may play it later
