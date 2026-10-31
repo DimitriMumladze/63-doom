@@ -126,6 +126,7 @@ const Net = {
       case 'match': this.brMatch(m); break;
       case 'S': this.brSnap(m); break;
       case 'you': BR.onYou(m); break;
+      case 'took': BR.onTook(m.i, m.by); break;
       case 'jumped':
         // the server has us out of the plane; it owns where from
         if (G.player) { G.player.x = m.x; G.player.y = m.y; }
@@ -227,6 +228,7 @@ const Net = {
     BR.kit = m.kit;
     BR.seed = m.seed;
     BR.spectating = !!m.spectate;
+    BR.onLoot(m.loot, m.caps);
     BR.plane = m.plane || null;
     BR.fall = m.fall || null;
     BR.planeT = m.plane ? m.plane.t : 0;
@@ -278,6 +280,7 @@ const Net = {
     }
     for (const e of m.e) {
       if (e[0] === 'k') BR.onKill(e[1], e[2], e[3], e[4]);
+      else if (e[0] === 't') BR.onTook(e[1], e[2]);
       else if (e[0] === 'm') G.say(e[1]);
     }
   },

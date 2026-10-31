@@ -38,7 +38,34 @@ const WEAPONS = {
 };
 const AMMO_MAX = { bullets: 200, shells: 50, rockets: 30, cells: 200 };
 
+// What a battle royale loot spot can hold, by how good a spot it is: 0 out in the
+// open, 1 in the places worth a detour, 2 in the handful you can be cornered in --
+// the warehouse mezzanine, the boss office, the lock-up, the middle of the underpass.
+// Weights, not probabilities; the server rolls each spot once from the match seed and
+// tells everyone the answer, so nobody rolls anything of their own.
+const LOOT_TIERS = [
+  [['clip', 26], ['shells', 18], ['coffee', 12], ['medkit', 10], ['shotgun', 10],
+    ['armor', 6], ['rifle', 6], ['cells', 4], ['chaingun', 4]],
+  [['shells', 16], ['clip', 14], ['rifle', 14], ['chaingun', 12], ['dbshotgun', 12],
+    ['medkit', 12], ['armor', 10], ['rockets', 6], ['cells', 4]],
+  [['plasmagun', 18], ['rocketl', 18], ['dbshotgun', 14], ['armor', 14], ['medkit', 12],
+    ['rockets', 12], ['cells', 12]],
+];
+
+// Ammo is meant to run out in a match, so the caps are lower than the campaign's.
+const BR_AMMO_MAX = { bullets: 120, shells: 32, rockets: 12, cells: 120 };
+
+// pick one from a weighted list, with a generator that returns 0..1
+function rollLoot(tier, rnd) {
+  const list = LOOT_TIERS[Math.max(0, Math.min(LOOT_TIERS.length - 1, tier | 0))];
+  let total = 0;
+  for (const [, w] of list) total += w;
+  let n = rnd() * total;
+  for (const [type, w] of list) { n -= w; if (n <= 0) return type; }
+  return list[0][0];
+}
+
 // Node (server.js) requires this; in the browser it is just a script.
 if (typeof module !== 'undefined' && module.exports) {
-  module.exports = { PROJ_TYPES, WEAPONS, AMMO_MAX };
+  module.exports = { PROJ_TYPES, WEAPONS, AMMO_MAX, LOOT_TIERS, BR_AMMO_MAX, rollLoot };
 }

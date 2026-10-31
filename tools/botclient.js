@@ -54,6 +54,8 @@ class Bot {
     this.shotAt = 0;
     this.fixes = 0;
     this.turn = (Math.random() - 0.5) * 2;
+    this.loot = []; this.got = 0; this.lost = 0; this.asked = new Set();
+    this.has = ['pistol']; this.ammo = { bullets: 20, shells: 0, rockets: 0, cells: 0 };
     this.aboard = false; this.falling = false; this.z = 0; this.planeT = 0;
     this.aimX = 0; this.aimY = 0; this.landed = false;
     this.ws = new WebSocket(`ws://${HOST}/ws`);
@@ -85,6 +87,8 @@ class Bot {
         this.x = m.spawn.x; this.y = m.spawn.y; this.a = m.spawn.a;
         this.alive = true; this.hp = 100; this.frozen = 0;
         this.weapon = m.kit.weapon;
+        this.loot = (m.loot || []).map(([i, type, x, y]) => ({ i, type, x, y, taken: false }));
+        this.got = 0; this.lost = 0; this.asked = new Set();
         this.plane = m.plane || null;
         this.fall = m.fall || { speed: 9, chuteAt: 8, chuteSpeed: 3 };
         this.aboard = !!m.plane;
@@ -100,6 +104,20 @@ class Bot {
         break;
       case 'you':
         this.hp = m.hp; this.alive = m.alive; this.place = m.place; this.kills = m.kills;
+        if (m.has) this.has = m.has;
+        if (m.ammo) this.ammo = m.ammo;
+        // carry the best thing they actually picked up
+        if (this.has) {
+          for (const g of ['plasmagun', 'rocketl', 'dbshotgun', 'chaingun', 'rifle',
+            'shotgun', 'pistol']) {
+            if (this.has.includes(g)) { this.weapon = g; break; }
+          }
+        }
+        break;
+      case 'took':
+        // the server says it is gone, or that we did not get it
+        if (this.loot && this.loot[m.i] && m.by) this.loot[m.i].taken = true;
+        if (!m.by && this.asked) this.asked.delete(m.i);
         break;
       case 'fix': this.x = m.x; this.y = m.y; this.fixes++; break;
       case 'S': this.snap(m); break;
@@ -117,6 +135,13 @@ class Bot {
       this.others.set(id, { x, y, hp, dead: !!(flags & 1), frozen: !!(flags & 8) });
     }
     for (const e of m.e) {
+      if (e[0] === 't') {
+        const it = this.loot && this.loot[e[1]];
+        if (it) it.taken = true;
+        if (e[2] === this.id) this.got++;
+        else if (this.asked && this.asked.has(e[1])) { this.lost++; this.asked.delete(e[1]); }
+        continue;
+      }
       if (e[0] === 'k' && this.i === 0) {
         say(`  [kill] ${e[1] || 'the office'} -> ${e[2]} with ${e[3] || 'nothing'} (#${e[4]})`);
         this.kills2 = (this.kills2 || 0) + 1;
@@ -157,7 +182,7 @@ class Bot {
       this.x = at.x; this.y = at.y;
       if (this.planeT > this.jumpAt) this.send({ t: 'jump' });
       this.send({ t: 'i', q: this.q, x: r2(this.x), y: r2(this.y), a: r2(this.a),
-        z: r2(this.z), c: 0, m: 0, w: this.weapon || 'shotgun' });
+        z: r2(this.z), c: 0, m: 0, w: this.weapon || 'pistol' });
       return;
     }
     this.fallT += dt;
@@ -171,7 +196,7 @@ class Bot {
     const dx = this.aimX - this.x, dy = this.aimY - this.y, d = Math.hypot(dx, dy);
     if (d > 0.1) { this.x += dx / d * Math.min(sp, d); this.y += dy / d * Math.min(sp, d); }
     this.send({ t: 'i', q: this.q, x: r2(this.x), y: r2(this.y), a: r2(this.a),
-      z: r2(this.z), c: 0, m: 1, w: this.weapon || 'shotgun' });
+      z: r2(this.z), c: 0, m: 1, w: this.weapon || 'pistol' });
     if (this.z <= 0) { this.falling = false; this.landed = true; }
   }
 
@@ -199,6 +224,27 @@ class Bot {
             this.turn *= 0.5;
           }
         }
+        // make for the nearest thing still on the ground
+        if (this.loot && this.loot.length) {
+          let best = null, bd = 900;
+          for (const it of this.loot) {
+            if (it.taken) continue;
+            const d = (it.x - this.x) ** 2 + (it.y - this.y) ** 2;
+            if (d < bd) { bd = d; best = it; }
+          }
+          if (best) {
+            if (bd < 0.3) {
+              this.asked.add(best.i);
+              this.send({ t: 'take', i: best.i });
+            } else {
+              const want = Math.atan2(best.y - this.y, best.x - this.x);
+              let turn = want - this.a;
+              turn = Math.atan2(Math.sin(turn), Math.cos(turn));
+              this.a += Math.max(-4 * dt, Math.min(4 * dt, turn * 5 * dt));
+              this.turn *= 0.4;
+            }
+          }
+        }
         const speed = 3.6;
         const nx = this.x + Math.cos(this.a) * speed * dt;
         const ny = this.y + Math.sin(this.a) * speed * dt;
@@ -206,7 +252,7 @@ class Bot {
         if (collide.freeCircle(C, this.x, ny, PLAYER_R)) this.y = ny; else this.turn += 1.6;
       }
       this.send({ t: 'i', q: this.q, x: r2(this.x), y: r2(this.y), a: r2(this.a), z: 0, c: 0,
-        m: 1, w: this.weapon || 'shotgun' });
+        m: 1, w: this.weapon || 'pistol' });
       this.tryShoot();
     } else if (this.q % 40 === 0) {
       this.send({ t: 'i', q: this.q, x: r2(this.x), y: r2(this.y), a: r2(this.a), z: 0, c: 0, m: 0 });
@@ -215,7 +261,8 @@ class Bot {
 
   tryShoot() {
     if (this.frozen > 0) return;
-    const w = WEAPONS[this.weapon || 'shotgun'];
+    const w = WEAPONS[this.weapon || 'pistol'];
+    if (this.ammo && (this.ammo[w.ammo] || 0) < (w.use || 1)) return;
     const now = Date.now();
     if (now - this.shotAt < w.cool * 1000 * 1.15) return;      // a little slower than allowed
     // the nearest living player we can see, within the gun's reach
@@ -228,7 +275,7 @@ class Bot {
       best = id; bestD = d;
     }
     this.shotAt = now;
-    const gun = this.weapon || 'shotgun';
+    const gun = this.weapon || 'pistol';
     if (!best) { this.send({ t: 'shot', w: gun, v: [] }); return; }
     const o = this.others.get(best);
     this.a = Math.atan2(o.y - this.y, o.x - this.x);
@@ -249,7 +296,10 @@ const loop = setInterval(() => {
   if (finished || Date.now() - started > 6 * 60 * 1000) {
     clearInterval(loop);
     const fixes = bots.reduce((n, b) => n + b.fixes, 0);
+    const got = bots.reduce((n, b) => n + (b.got || 0), 0);
+    const lost = bots.reduce((n, b) => n + (b.lost || 0), 0);
     console.log(`\n  ${bots.length} bots, ${fixes} position corrections from the server`);
+    console.log(`  loot: ${got} taken, ${lost} races lost to someone else`);
     for (const b of bots) try { b.ws.close(); } catch (e) {}
     setTimeout(() => process.exit(finished ? 0 : 1), 300);
   }

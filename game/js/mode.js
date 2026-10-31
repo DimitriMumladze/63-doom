@@ -12,6 +12,15 @@
 
 const BR_MIN_PLAYERS = 2;
 
+// What to say when you pick a thing up. The campaign's lines live in Game.pickup,
+// which the battle royale does not use -- the server owns the inventory there.
+const LOOT_SAYS = {
+  medkit: 'First aid kit.', coffee: 'Coffee. Productivity +10.', armor: 'Body armor.',
+  clip: 'A clip.', shells: 'Shells.', rockets: 'Rockets.', cells: 'An energy cell.',
+  shotgun: 'SHOTGUN. (2)', dbshotgun: 'SUPER SHOTGUN. (3)', chaingun: 'CHAINGUN. (4)',
+  rifle: 'ASSAULT RIFLE. (5)', rocketl: 'ROCKET LAUNCHER. (6)', plasmagun: 'PLASMA RIFLE. (7)',
+};
+
 // Which map the battle royale is played on. The server says so in its welcome and
 // both sides have to agree, because everything about a match is sent as positions
 // in it. maps/yard.js is the small one the netcode was built against, kept because a
@@ -107,6 +116,7 @@ const Modes = {
     },
 
     update(dt) {
+      BR.tryTake();
       BR.update(dt);
       Music.setIntensity(BR.ring && BR.outside ? 1 : Math.min(1, BR.nearbyFire / 2));
     },
@@ -145,6 +155,10 @@ const BR = {
   ring: null,            // { cx, cy, r, tx, ty, tr, phase, shrinking, left, dps }
   outside: false, warnT: 0, nearbyFire: 0,
   feed: [],              // kill feed: { text, colour, t }
+  // What is lying about, as the server rolled it. `pend` is set when we have walked
+  // over something and asked for it: it stops being drawn straight away so picking up
+  // feels instant, and comes back if the server says someone else got there first.
+  loot: [], caps: null,
   board: null, winner: 0,
   specId: 0,             // whose eyes you are watching through once you are out
 
@@ -154,6 +168,40 @@ const BR = {
     this.place = 0; this.kills = 0; this.specId = 0; this.spectating = false;
     this.aboard = false; this.falling = false; this.fallT = 0; this.z = 0;
     this.plane = null; this.planeT = 0; this.aboardN = 0;
+    this.loot = [];
+  },
+
+  // ---------------- loot ----------------
+  onLoot(list, caps) {
+    this.caps = caps || null;
+    this.loot = (list || []).map(([i, type, x, y]) => ({
+      i, type, x, y, taken: false, pend: 0, tex: Assets.get('item/' + type),
+    }));
+  },
+
+  // the server's word on who got what
+  onTook(i, by) {
+    const it = this.loot[i];
+    if (!it) return;
+    if (by) { it.taken = true; it.pend = 0; return; }
+    it.pend = 0;                   // nobody got it: it is still there
+  },
+
+  // Walked over something. Taken off the ground here and asked for at the same time;
+  // if it turns out someone else had it, onTook puts it back.
+  tryTake() {
+    const p = Game.player;
+    if (!p || p.dead || this.state !== 'live') return;
+    for (const it of this.loot) {
+      if (it.taken || it.pend > Game.time) continue;
+      if ((it.x - p.x) ** 2 + (it.y - p.y) ** 2 > 0.36) continue;
+      it.pend = Game.time + 1.5;
+      Net.send({ t: 'take', i: it.i });
+      Sound.play('pickup');
+      Game.washG = 0.25;
+      Game.say(LOOT_SAYS[it.type] || ('Picked up ' + it.type + '.'));
+      return;                      // one at a time, so two never go on one step
+    }
   },
 
   onMatchStart() {
@@ -255,6 +303,15 @@ const BR = {
     const wasDead = p.dead;
     p.hp = m.hp;
     p.armor = m.ar;
+    // the server owns what you are carrying, the same as it owns your health
+    if (m.has) {
+      for (const name in WEAPONS) p.has[name] = m.has.includes(name);
+      if (!p.has[p.weapon]) {
+        const first = m.has[m.has.length - 1];
+        if (first) Game.switchWeapon(first);
+      }
+    }
+    if (m.ammo) for (const k in m.ammo) p.ammo[k] = m.ammo[k];
     this.place = m.place || 0;
     this.kills = m.kills || 0;
     if (m.spec) this.specId = m.spec;
@@ -304,6 +361,14 @@ const BR = {
   // ---------------- what you see ----------------
   sprites(out) {
     const p = Game.player;
+    // the loot, culled the way the level's own pickups are
+    const cull2 = Game.L.cull ? Game.L.cull * Game.L.cull : Infinity;
+    for (const it of this.loot) {
+      if (it.taken || it.pend > Game.time) continue;
+      if ((it.x - p.x) ** 2 + (it.y - p.y) ** 2 > cull2) continue;
+      out.push({ x: it.x, y: it.y, tex: it.tex, h: PICKUPS[it.type] ? PICKUPS[it.type].h : 0.2,
+        lift: 0 });
+    }
     for (const r of Net.active()) {
       if (r.dead && r.deadT > 6) continue;         // bodies stop being drawn eventually
       if (r.aboard) continue;                      // still on the plane, nowhere to draw them

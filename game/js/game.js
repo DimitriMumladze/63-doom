@@ -352,7 +352,9 @@ const Game = {
         if (alt) this.switchWeapon(alt);
       }
     }
-    // pickups
+    // pickups. In a battle royale what is on the ground came from the server and is
+    // handled by BR.tryTake; the level has none of its own.
+    if (this.mode.id === 'br') return;
     for (const it of this.L.pickups) {
       if (it.taken || it.mine || (it.x - p.x) ** 2 + (it.y - p.y) ** 2 > 0.36) continue;
       if (!this.pickup(it.type)) continue;

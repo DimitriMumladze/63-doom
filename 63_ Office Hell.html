@@ -475,9 +475,36 @@ const WEAPONS = {
 };
 const AMMO_MAX = { bullets: 200, shells: 50, rockets: 30, cells: 200 };
 
+// What a battle royale loot spot can hold, by how good a spot it is: 0 out in the
+// open, 1 in the places worth a detour, 2 in the handful you can be cornered in --
+// the warehouse mezzanine, the boss office, the lock-up, the middle of the underpass.
+// Weights, not probabilities; the server rolls each spot once from the match seed and
+// tells everyone the answer, so nobody rolls anything of their own.
+const LOOT_TIERS = [
+  [['clip', 26], ['shells', 18], ['coffee', 12], ['medkit', 10], ['shotgun', 10],
+    ['armor', 6], ['rifle', 6], ['cells', 4], ['chaingun', 4]],
+  [['shells', 16], ['clip', 14], ['rifle', 14], ['chaingun', 12], ['dbshotgun', 12],
+    ['medkit', 12], ['armor', 10], ['rockets', 6], ['cells', 4]],
+  [['plasmagun', 18], ['rocketl', 18], ['dbshotgun', 14], ['armor', 14], ['medkit', 12],
+    ['rockets', 12], ['cells', 12]],
+];
+
+// Ammo is meant to run out in a match, so the caps are lower than the campaign's.
+const BR_AMMO_MAX = { bullets: 120, shells: 32, rockets: 12, cells: 120 };
+
+// pick one from a weighted list, with a generator that returns 0..1
+function rollLoot(tier, rnd) {
+  const list = LOOT_TIERS[Math.max(0, Math.min(LOOT_TIERS.length - 1, tier | 0))];
+  let total = 0;
+  for (const [, w] of list) total += w;
+  let n = rnd() * total;
+  for (const [type, w] of list) { n -= w; if (n <= 0) return type; }
+  return list[0][0];
+}
+
 // Node (server.js) requires this; in the browser it is just a script.
 if (typeof module !== 'undefined' && module.exports) {
-  module.exports = { PROJ_TYPES, WEAPONS, AMMO_MAX };
+  module.exports = { PROJ_TYPES, WEAPONS, AMMO_MAX, LOOT_TIERS, BR_AMMO_MAX, rollLoot };
 }
 
 </script>
@@ -2030,6 +2057,15 @@ if (typeof module !== 'undefined' && module.exports) module.exports = { BLOCK_MA
 
 const BR_MIN_PLAYERS = 2;
 
+// What to say when you pick a thing up. The campaign's lines live in Game.pickup,
+// which the battle royale does not use -- the server owns the inventory there.
+const LOOT_SAYS = {
+  medkit: 'First aid kit.', coffee: 'Coffee. Productivity +10.', armor: 'Body armor.',
+  clip: 'A clip.', shells: 'Shells.', rockets: 'Rockets.', cells: 'An energy cell.',
+  shotgun: 'SHOTGUN. (2)', dbshotgun: 'SUPER SHOTGUN. (3)', chaingun: 'CHAINGUN. (4)',
+  rifle: 'ASSAULT RIFLE. (5)', rocketl: 'ROCKET LAUNCHER. (6)', plasmagun: 'PLASMA RIFLE. (7)',
+};
+
 // Which map the battle royale is played on. The server says so in its welcome and
 // both sides have to agree, because everything about a match is sent as positions
 // in it. maps/yard.js is the small one the netcode was built against, kept because a
@@ -2125,6 +2161,7 @@ const Modes = {
     },
 
     update(dt) {
+      BR.tryTake();
       BR.update(dt);
       Music.setIntensity(BR.ring && BR.outside ? 1 : Math.min(1, BR.nearbyFire / 2));
     },
@@ -2163,6 +2200,10 @@ const BR = {
   ring: null,            // { cx, cy, r, tx, ty, tr, phase, shrinking, left, dps }
   outside: false, warnT: 0, nearbyFire: 0,
   feed: [],              // kill feed: { text, colour, t }
+  // What is lying about, as the server rolled it. `pend` is set when we have walked
+  // over something and asked for it: it stops being drawn straight away so picking up
+  // feels instant, and comes back if the server says someone else got there first.
+  loot: [], caps: null,
   board: null, winner: 0,
   specId: 0,             // whose eyes you are watching through once you are out
 
@@ -2172,6 +2213,40 @@ const BR = {
     this.place = 0; this.kills = 0; this.specId = 0; this.spectating = false;
     this.aboard = false; this.falling = false; this.fallT = 0; this.z = 0;
     this.plane = null; this.planeT = 0; this.aboardN = 0;
+    this.loot = [];
+  },
+
+  // ---------------- loot ----------------
+  onLoot(list, caps) {
+    this.caps = caps || null;
+    this.loot = (list || []).map(([i, type, x, y]) => ({
+      i, type, x, y, taken: false, pend: 0, tex: Assets.get('item/' + type),
+    }));
+  },
+
+  // the server's word on who got what
+  onTook(i, by) {
+    const it = this.loot[i];
+    if (!it) return;
+    if (by) { it.taken = true; it.pend = 0; return; }
+    it.pend = 0;                   // nobody got it: it is still there
+  },
+
+  // Walked over something. Taken off the ground here and asked for at the same time;
+  // if it turns out someone else had it, onTook puts it back.
+  tryTake() {
+    const p = Game.player;
+    if (!p || p.dead || this.state !== 'live') return;
+    for (const it of this.loot) {
+      if (it.taken || it.pend > Game.time) continue;
+      if ((it.x - p.x) ** 2 + (it.y - p.y) ** 2 > 0.36) continue;
+      it.pend = Game.time + 1.5;
+      Net.send({ t: 'take', i: it.i });
+      Sound.play('pickup');
+      Game.washG = 0.25;
+      Game.say(LOOT_SAYS[it.type] || ('Picked up ' + it.type + '.'));
+      return;                      // one at a time, so two never go on one step
+    }
   },
 
   onMatchStart() {
@@ -2273,6 +2348,15 @@ const BR = {
     const wasDead = p.dead;
     p.hp = m.hp;
     p.armor = m.ar;
+    // the server owns what you are carrying, the same as it owns your health
+    if (m.has) {
+      for (const name in WEAPONS) p.has[name] = m.has.includes(name);
+      if (!p.has[p.weapon]) {
+        const first = m.has[m.has.length - 1];
+        if (first) Game.switchWeapon(first);
+      }
+    }
+    if (m.ammo) for (const k in m.ammo) p.ammo[k] = m.ammo[k];
     this.place = m.place || 0;
     this.kills = m.kills || 0;
     if (m.spec) this.specId = m.spec;
@@ -2322,6 +2406,14 @@ const BR = {
   // ---------------- what you see ----------------
   sprites(out) {
     const p = Game.player;
+    // the loot, culled the way the level's own pickups are
+    const cull2 = Game.L.cull ? Game.L.cull * Game.L.cull : Infinity;
+    for (const it of this.loot) {
+      if (it.taken || it.pend > Game.time) continue;
+      if ((it.x - p.x) ** 2 + (it.y - p.y) ** 2 > cull2) continue;
+      out.push({ x: it.x, y: it.y, tex: it.tex, h: PICKUPS[it.type] ? PICKUPS[it.type].h : 0.2,
+        lift: 0 });
+    }
     for (const r of Net.active()) {
       if (r.dead && r.deadT > 6) continue;         // bodies stop being drawn eventually
       if (r.aboard) continue;                      // still on the plane, nowhere to draw them
@@ -3145,7 +3237,9 @@ const Game = {
         if (alt) this.switchWeapon(alt);
       }
     }
-    // pickups
+    // pickups. In a battle royale what is on the ground came from the server and is
+    // handled by BR.tryTake; the level has none of its own.
+    if (this.mode.id === 'br') return;
     for (const it of this.L.pickups) {
       if (it.taken || it.mine || (it.x - p.x) ** 2 + (it.y - p.y) ** 2 > 0.36) continue;
       if (!this.pickup(it.type)) continue;
@@ -3838,6 +3932,7 @@ const Net = {
       case 'match': this.brMatch(m); break;
       case 'S': this.brSnap(m); break;
       case 'you': BR.onYou(m); break;
+      case 'took': BR.onTook(m.i, m.by); break;
       case 'jumped':
         // the server has us out of the plane; it owns where from
         if (G.player) { G.player.x = m.x; G.player.y = m.y; }
@@ -3939,6 +4034,7 @@ const Net = {
     BR.kit = m.kit;
     BR.seed = m.seed;
     BR.spectating = !!m.spectate;
+    BR.onLoot(m.loot, m.caps);
     BR.plane = m.plane || null;
     BR.fall = m.fall || null;
     BR.planeT = m.plane ? m.plane.t : 0;
@@ -3990,6 +4086,7 @@ const Net = {
     }
     for (const e of m.e) {
       if (e[0] === 'k') BR.onKill(e[1], e[2], e[3], e[4]);
+      else if (e[0] === 't') BR.onTook(e[1], e[2]);
       else if (e[0] === 'm') G.say(e[1]);
     }
   },

@@ -65,6 +65,7 @@ node tools/checkmap.js [block|yard|office] [--ascii]   checks a map spec
 node tools/checkoffice.js  the office inside the block is still the office
 node tools/botclient.js 15                        fills a match with bots
 node tools/headless.js 8                          plays a match with real clients
+node tools/lootrace.js 8                          everyone grabs one item at once
 ```
 
 `smoke.js` and `drawtest.js` are the regression tests: between them they run the real
@@ -172,11 +173,25 @@ Windows may ask to let Node through the firewall: allow it on private networks.
 
 - **The lobby.** Pick which colleague you are -- there are nine, and the server hands out the
   spare ones first so two people are not the same person while there is a choice -- and ready
-  up. The match starts once everyone is ready, or after a minute and a half regardless. Two
-  people minimum, fifteen maximum. Turn up mid-match and you watch until the next one.
-- **The drop.** No parachute: there is one floor in a raycaster. The lift doors open on a
-  spawn point chosen to be as far from everybody else as the map allows, and you cannot move
-  or be shot for the first two and a half seconds.
+  up. **The match starts when everyone is ready.** If some have been ready two minutes while
+  others have not, it goes without them and they watch this one. Someone arriving during the
+  countdown sends it back to the lobby, so nobody loses a match to a few seconds. Two people
+  minimum, fifteen maximum.
+- **The drop.** Everyone rides out over the block and jumps when they like. The flight is a line
+  across the map drawn from the match seed, the doors open a second and a half in, and it crosses
+  in seven to ten seconds -- so the first one out and the last land a long way apart. Free fall is
+  nine units a second down to eight units up, where the chute takes over; the whole descent is
+  about four and a half seconds and you steer the while. Nobody can shoot or be shot in the air,
+  and the ring does not start until everyone is down.
+
+  It is rendered for real, from above the walls: roofs below you, streets between them, and the
+  whole map in the corner with the flight line on it. There is still only one floor plane -- the
+  camera goes up, the world does not gain a storey.
+- **Loot.** You land with a pistol and twenty rounds; everything else is on the ground. The map
+  marks 106 spots in three tiers, and the server fills each one from the match seed and tells
+  everyone the answer -- nobody rolls their own. Picking something up is shown immediately and
+  asked for at the same time; if someone else got there first it comes back. Ammo caps are lower
+  than the campaign's, so it runs out.
 - **The ring** is the building's fire-suppression system venting the yard a section at a time.
   Seven phases, each sitting still and then closing on a new circle drawn inside the old one.
   Outside it you lose 1 health a second at first and 18 by the end, and body armour is no help

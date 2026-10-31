@@ -257,8 +257,26 @@ const RING_PHASES = [
 const RING_TICK = 0.5;             // damage is applied in half-second bites, not per frame
 
 // What everyone starts with until loot lands. The ring comes first; see the plan.
-const START_KIT = { weapon: 'shotgun', has: ['pistol', 'shotgun'],
-  ammo: { bullets: 60, shells: 24, rockets: 0, cells: 0 } };
+// A pistol and a magazine. Everything else is on the ground, which is the point of
+// putting it there.
+const START_KIT = { weapon: 'pistol', has: ['pistol'],
+  ammo: { bullets: 20, shells: 0, rockets: 0, cells: 0 } };
+
+// What each thing does when you pick it up. The campaign has this in Game.pickup, but
+// that one is written round one player's inventory and says things into the HUD; here
+// the server owns the numbers for fifteen of them and the caps are the lower BR ones.
+const PICKUP_GIVES = {
+  medkit: { hp: 25 }, coffee: { hp: 10 }, armor: { armor: 100 },
+  clip: { ammo: 'bullets', n: 15 }, shells: { ammo: 'shells', n: 6 },
+  rockets: { ammo: 'rockets', n: 5 }, cells: { ammo: 'cells', n: 40 },
+  shotgun: { gun: 'shotgun', ammo: 'shells', n: 8 },
+  dbshotgun: { gun: 'dbshotgun', ammo: 'shells', n: 10 },
+  chaingun: { gun: 'chaingun', ammo: 'bullets', n: 30 },
+  rifle: { gun: 'rifle', ammo: 'bullets', n: 40 },
+  rocketl: { gun: 'rocketl', ammo: 'rockets', n: 6 },
+  plasmagun: { gun: 'plasmagun', ammo: 'cells', n: 60 },
+};
+const TAKE_RANGE = 1.1;            // a little over the client's own reach, for latency
 
 const BR = {
   MAX: 15, MIN: 2,
@@ -270,6 +288,7 @@ const BR = {
   ringT: 0,
   plane: null,                     // see startPlane(); null except during the drop
   dropT: 0,                        // seconds since the first person jumped
+  loot: [],                        // [{ i, type, x, y, taken }] rolled from the seed
   feed: [],                        // events to put in the next snapshot
   dead: [],                        // finishing order, worst first
 
@@ -287,6 +306,7 @@ const BR = {
       x: 0, y: 0, a: 0, z: 0, crouch: 0, moving: false, weapon: START_KIT.weapon, shots: 0,
       hp: 100, armor: 0, alive: false, kills: 0, place: 0, frozen: 0,
       aboard: false, fellAt: 0, landed: true,
+      has: START_KIT.has.slice(), ammo: Object.assign({}, START_KIT.ammo),
       hist: [], lastShot: {}, at: Date.now(), rtt: 0, qAt: 0, spec: 0, late: false,
     };
     this.players.set(p.id, p);
@@ -296,6 +316,15 @@ const BR = {
     if (this.state === 'live' || this.state === 'over') {
       p.late = true;
       send(c, this.matchMsg(p));
+    }
+    // Someone arriving during the countdown would otherwise sit out a whole match for
+    // the sake of a few seconds. Back to the lobby: with readiness gating the start it
+    // goes again the moment they are ready, and the READY_HOLD backstop still applies
+    // because readyT keeps running.
+    if (this.state === 'countdown') {
+      this.state = 'lobby';
+      this.t = 0;
+      this.say(`${p.name} just made it. Ready up again.`);
     }
     log(`${p.name} (P${p.slot}) joined the battle royale from ${c.addr}, ${this.players.size} in`);
     this.say(`${p.name} clocked in.`);
@@ -347,6 +376,7 @@ const BR = {
       case 'i': this.input(p, m); break;
       case 'shot': this.shot(p, m); break;
       case 'jump': this.jump(p); break;
+      case 'take': this.take(p, m); break;
       case 'spec': if (!p.alive && this.players.has(m.id)) p.spec = m.id; break;
     }
   },
@@ -450,10 +480,14 @@ const BR = {
     const name = m.w;
     const w = Rules.WEAPONS[name];
     if (!w) return;
+    if (!p.has.includes(name)) return;                    // a gun they never picked up
+    const need = w.use || 1;
+    if ((p.ammo[w.ammo] || 0) < need) return;             // and it has to be loaded
     const now = Date.now();
     const last = p.lastShot[name] || 0;
     if (now - last < w.cool * 1000 * 0.75) return;        // firing faster than the gun can
     p.lastShot[name] = now;
+    p.ammo[w.ammo] -= need;
     p.shots++;
 
     const claims = Array.isArray(m.v) ? m.v.slice(0, 8) : [];
@@ -517,6 +551,7 @@ const BR = {
     this.dead = [];
     this.startRing(rnd);
     this.startPlane(rnd);
+    this.startLoot(rnd);
     this.sent = 0; this.tickMs = 0; this.tickPeak = 0; this.reportT = 0;
 
     // Who is actually in it. Anyone not ready when it went watches this one and is in
@@ -541,6 +576,7 @@ const BR = {
       p.crouch = 0; p.moving = false;
       p.hp = 100; p.armor = 0; p.alive = true; p.kills = 0; p.place = 0;
       p.weapon = START_KIT.weapon;
+      p.has = START_KIT.has.slice();
       p.ammo = Object.assign({}, START_KIT.ammo);
       p.frozen = 0;
       p.hist = [[Date.now(), p.x, p.y]];
@@ -553,6 +589,57 @@ const BR = {
       (this.players.size > playing.length ? ` (${this.players.size - playing.length} watching)` : '') +
       `, seed ${this.seed}`);
     updateLobby();
+  },
+
+  // ---------------- loot ----------------
+  // Every spot the map marks, filled once from the match seed. The resolved list goes
+  // out with the match -- two kilobytes, once -- rather than both sides rolling from
+  // the seed, which would be the same answer right up until it was not.
+  startLoot(rnd) {
+    this.loot = Rules.C.loot.map((spot, i) => ({
+      i, type: Rules.rollLoot(spot.tier, rnd), x: spot.x, y: spot.y, taken: false,
+    }));
+  },
+
+  lootMsg() { return this.loot.map(l => [l.i, l.type, r2(l.x), r2(l.y)]); },
+
+  // Someone says they walked over something. The server owns whether it is still
+  // there, which is the whole question when two people reach it together.
+  take(p, m) {
+    if (this.state !== 'live' || !p.alive || !p.landed) return;
+    const it = this.loot[m.i | 0];
+    if (!it || it.taken) { send(p.conn, { t: 'took', i: m.i | 0, by: 0 }); return; }
+    if (Math.hypot(it.x - p.x, it.y - p.y) > TAKE_RANGE) return;
+    const give = PICKUP_GIVES[it.type];
+    if (!give) return;
+    // no use for it: leave it where it is, for someone who has
+    if (!this.giveTo(p, give)) return;
+    it.taken = true;
+    this.feed.push(['t', it.i, p.id]);
+    this.pushYou(p);
+  },
+
+  giveTo(p, give) {
+    let used = false;
+    if (give.hp) {
+      if (p.hp >= 100) return false;
+      p.hp = Math.min(100, p.hp + give.hp);
+      used = true;
+    }
+    if (give.armor) {
+      if (p.armor >= give.armor) return false;
+      p.armor = give.armor;
+      used = true;
+    }
+    if (give.gun && !p.has.includes(give.gun)) { p.has.push(give.gun); used = true; }
+    if (give.ammo) {
+      const cap = Rules.BR_AMMO_MAX[give.ammo] || 0;
+      if (p.ammo[give.ammo] < cap) {
+        p.ammo[give.ammo] = Math.min(cap, p.ammo[give.ammo] + give.n);
+        used = true;
+      }
+    }
+    return used;
   },
 
   // ---------------- the plane ----------------
@@ -789,6 +876,9 @@ const BR = {
         alt: g.alt, speed: g.speed, t: r2(g.t), lead: PLANE_LEAD } : null,
       fall: { speed: FALL_SPEED, chuteAt: CHUTE_AT, chuteSpeed: CHUTE_SPEED },
       kit: { weapon: START_KIT.weapon, has: START_KIT.has, ammo: START_KIT.ammo },
+      loot: this.lootMsg(),
+      // what each kind of thing gives, so the client can show it without guessing
+      caps: Rules.BR_AMMO_MAX,
       ring: this.ring ? { cx: r2(this.ring.cx), cy: r2(this.ring.cy), r: r2(this.ring.r) } : null,
       phases: RING_PHASES.length };
   },
@@ -944,7 +1034,8 @@ const BR = {
   // a player's own numbers, which are nobody else's business and only change in jumps
   pushYou(p) {
     send(p.conn, { t: 'you', hp: Math.ceil(p.hp), ar: p.armor, alive: p.alive,
-      place: p.place, kills: p.kills, spec: p.spec });
+      place: p.place, kills: p.kills, spec: p.spec,
+      has: p.has, ammo: p.ammo });
   },
 
   pushLobby() {
