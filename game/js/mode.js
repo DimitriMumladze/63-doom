@@ -111,6 +111,9 @@ const Modes = {
       Music.setIntensity(BR.ring && BR.outside ? 1 : Math.min(1, BR.nearbyFire / 2));
     },
 
+    // aboard and falling you are not on the ground, so none of the walking rules apply
+    airborne() { return BR.aboard || BR.falling; },
+
     // the other fifteen, each as their own colleague
     sprites(out) { BR.sprites(out); },
 
@@ -131,7 +134,13 @@ const BR = {
   ready: false, myName: '', mySkin: 'irakli', pick: 0,
 
   // the match
-  spawn: null, kit: null, seed: 0, freeze: 0, spectating: false,
+  spawn: null, kit: null, seed: 0, spectating: false,
+
+  // The drop. `plane` is the flight the server sent; `planeT` runs it forward between
+  // snapshots so the ride is smooth, and the server's `pl` corrects it 20 times a
+  // second. Aboard until you jump, then falling until z reaches nothing.
+  plane: null, planeT: 0, aboard: false, aboardN: 0,
+  falling: false, fallT: 0, z: 0, fall: null,
   alive: 0, started: 0, place: 0, kills: 0,
   ring: null,            // { cx, cy, r, tx, ty, tr, phase, shrinking, left, dps }
   outside: false, warnT: 0, nearbyFire: 0,
@@ -143,12 +152,100 @@ const BR = {
     this.ring = null; this.board = null; this.winner = 0;
     this.feed = []; this.outside = false; this.warnT = 0; this.nearbyFire = 0;
     this.place = 0; this.kills = 0; this.specId = 0; this.spectating = false;
+    this.aboard = false; this.falling = false; this.fallT = 0; this.z = 0;
+    this.plane = null; this.planeT = 0; this.aboardN = 0;
   },
 
   onMatchStart() {
+    const spectating = this.spectating;
+    const plane = this.plane, fall = this.fall, planeT = this.planeT;
     this.reset();
-    Game.say(this.spectating ? 'Match in progress. Watching until the next one.'
-      : 'The lift doors open. Fifteen of you. One stays.');
+    this.spectating = spectating;
+    this.plane = plane; this.fall = fall; this.planeT = planeT;
+    if (!spectating && plane) {
+      this.aboard = true;
+      this.z = plane.alt;
+      Game.say('Out over Burdzgla St. Jump when you like.');
+    } else {
+      Game.say(spectating ? 'Match in progress. Watching until the next one.'
+        : 'The lift doors open.');
+    }
+  },
+
+  // ---------------- the drop ----------------
+  // where the plane is, this far into its run
+  planeAt(t) {
+    const g = this.plane;
+    const len = Math.hypot(g.x1 - g.x0, g.y1 - g.y0);
+    const dx = (g.x1 - g.x0) / len, dy = (g.y1 - g.y0) / len;
+    // never past the end of the run, the same clamp the server applies
+    const d = Math.max(0, Math.min(len, Math.max(0, t) * g.speed));
+    return { x: g.x0 + dx * d, y: g.y0 + dy * d, dx, dy, len };
+  },
+
+  // the doors are shut for the first moment, so nobody jumps before the map
+  canJump() { return this.aboard && this.plane && this.planeT > 0; },
+
+  jump() {
+    if (!this.canJump()) return;
+    const at = this.planeAt(this.planeT);
+    this.aboard = false;
+    this.falling = true;
+    this.fallT = 0;
+    this.z = this.plane.alt;
+    const p = Game.player;
+    p.x = at.x; p.y = at.y;
+    p.a = Math.atan2(at.dy, at.dx);
+    Net.send({ t: 'jump' });
+    Sound.play('jump');
+    Game.say('Out. Steer.');
+  },
+
+  // the height the server will expect, so the two never drift apart
+  fallHeight(secs) {
+    const f = this.fall || { speed: 9, chuteAt: 8, chuteSpeed: 3 };
+    const alt = this.plane ? this.plane.alt : 24;
+    const toChute = (alt - f.chuteAt) / f.speed;
+    if (secs <= toChute) return alt - secs * f.speed;
+    return Math.max(0, f.chuteAt - (secs - toChute) * f.chuteSpeed);
+  },
+
+  chuteOpen() { return this.falling && this.z <= (this.fall ? this.fall.chuteAt : 8); },
+
+  // Riding and falling, run on the client so both are smooth; the server's snapshot
+  // pulls the plane back into line and owns the moment of landing.
+  updateDrop(dt) {
+    if (this.plane) this.planeT += dt;
+    const p = Game.player;
+    if (this.aboard) {
+      const at = this.planeAt(this.planeT);
+      p.x = at.x; p.y = at.y;
+      this.z = this.plane.alt;
+      return;
+    }
+    if (!this.falling) return;
+    this.fallT += dt;
+    this.z = this.fallHeight(this.fallT);
+    // steer: the same keys as walking, faster in free fall than under the chute
+    const sp = (this.chuteOpen() ? 4.5 : 7) * dt;
+    const k = Input.keys, pad = Input.pad, tc = Input.touch;
+    const fwd = ((k.KeyW || k.ArrowUp) ? 1 : 0) - ((k.KeyS || k.ArrowDown) ? 1 : 0) - pad.ly - tc.ly;
+    const str = (k.KeyD ? 1 : 0) - (k.KeyA ? 1 : 0) + pad.lx + tc.lx;
+    const ca = Math.cos(p.a), sa = Math.sin(p.a);
+    let mx = ca * fwd - sa * str, my = sa * fwd + ca * str;
+    const ml = Math.hypot(mx, my);
+    if (ml > 0) {
+      // no walls up here, only the edge of the world
+      p.x = Math.max(0.6, Math.min(Game.L.w - 0.6, p.x + mx / ml * sp));
+      p.y = Math.max(0.6, Math.min(Game.L.h - 0.6, p.y + my / ml * sp));
+    }
+    if (this.z <= 0) {
+      this.falling = false;
+      this.z = 0;
+      Sound.play('land');
+      Game.say('Down. Find a gun.');
+      Main.onLanded();
+    }
   },
 
   // ---------------- the server's word on your own numbers ----------------
@@ -209,6 +306,7 @@ const BR = {
     const p = Game.player;
     for (const r of Net.active()) {
       if (r.dead && r.deadT > 6) continue;         // bodies stop being drawn eventually
+      if (r.aboard) continue;                      // still on the plane, nowhere to draw them
       const frame = r.dead ? 'death4' : r.shotT < 0.15 ? 'attack2'
         : r.moving ? ['walk1', 'walk2', 'walk3', 'walk2'][Math.floor(r.animT / 0.17) % 4] : 'idle';
       const tint = skinTint(r);

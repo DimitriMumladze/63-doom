@@ -174,6 +174,12 @@ BR.roster = [{ id: 3, slot: 3, name: 'IRAKLI', skin: 'irakli', ready: true, late
 draw('lobby, alone', g => Hud.drawBrLobby(g, 2.5));
 BR.ready = true;
 draw('lobby, ready', g => Hud.drawBrLobby(g, 2.5));
+BR.roster = [
+  { id: 3, slot: 3, name: 'IRAKLI', skin: 'irakli', ready: true, late: false },
+  { id: 4, slot: 4, name: 'NIKOLOZ', skin: 'tank', ready: false, late: false },
+  { id: 5, slot: 5, name: 'LASHA', skin: 'rider', ready: false, late: false },
+];
+draw('lobby, waiting on two of them', g => Hud.drawBrLobby(g, 2.5));
 
 // a match in progress
 Game.start('br');
@@ -201,6 +207,31 @@ draw('render the yard with the ring', () => {
   Engine.render({ x: Game.player.x, y: Game.player.y, a: 0.7, ring: BR.ring, ringTime: 3 },
     Game.L, Game.sprites());
 });
+
+// the drop: aboard, free-falling, under the chute
+console.log('');
+console.log('the drop:');
+BR.plane = { x0: 4, y0: 10, x1: 92, y1: 86, alt: 24, speed: 13, t: 2.5, lead: 1.5 };
+BR.fall = { speed: 9, chuteAt: 8, chuteSpeed: 3 };
+BR.planeT = 2.5; BR.aboard = true; BR.aboardN = 9; BR.falling = false; BR.z = 24;
+Game.player.x = 30; Game.player.y = 26;
+draw('aboard, doors open', g => Hud.drawDrop(g, 1.2));
+BR.planeT = 0;
+draw('aboard, doors still shut', g => Hud.drawDrop(g, 1.2));
+BR.planeT = 2.5; BR.aboard = false; BR.falling = true; BR.z = 18; BR.fallT = 0.7; BR.aboardN = 4;
+draw('free fall', g => Hud.drawDrop(g, 1.2));
+BR.z = 5; BR.fallT = 2.6;
+draw('under the chute', g => Hud.drawDrop(g, 1.2));
+BR.plane = null;
+draw('drop screen with no flight (should not throw)', g => Hud.drawDrop(g, 1.2));
+// and the aerial view itself, through the real renderer
+BR.plane = { x0: 4, y0: 10, x1: 92, y1: 86, alt: 24, speed: 13, t: 2.5, lead: 1.5 };
+for (const [label, z, hz] of [['from the plane', 24, -150], ['mid fall', 12, -90], ['about to land', 2.4, -20]]) {
+  draw('render ' + label, () => {
+    Engine.render({ x: 48.5, y: 38.5, a: 0.6, eyeZ: z, horizon: hz }, Game.L, Game.sprites());
+  });
+}
+BR.aboard = false; BR.falling = false; BR.z = 0;
 
 // dead, watching, and the scoreboard
 Game.player.dead = true;

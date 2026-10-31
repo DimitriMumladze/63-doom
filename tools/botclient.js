@@ -54,6 +54,8 @@ class Bot {
     this.shotAt = 0;
     this.fixes = 0;
     this.turn = (Math.random() - 0.5) * 2;
+    this.aboard = false; this.falling = false; this.z = 0; this.planeT = 0;
+    this.aimX = 0; this.aimY = 0; this.landed = false;
     this.ws = new WebSocket(`ws://${HOST}/ws`);
     this.ws.onopen = () => this.send({ t: 'hello', mode: 'br', name: this.name, skin: this.skin });
     this.ws.onmessage = ev => this.recv(JSON.parse(ev.data));
@@ -81,9 +83,20 @@ class Bot {
       case 'match':
         if (m.spectate) { say(`  ${this.name} arrived late, watching`); break; }
         this.x = m.spawn.x; this.y = m.spawn.y; this.a = m.spawn.a;
-        this.alive = true; this.hp = 100; this.frozen = m.freeze;
+        this.alive = true; this.hp = 100; this.frozen = 0;
         this.weapon = m.kit.weapon;
-        if (this.i === 0) say(`[match] dropped on "${m.map}", seed ${m.seed}`);
+        this.plane = m.plane || null;
+        this.fall = m.fall || { speed: 9, chuteAt: 8, chuteSpeed: 3 };
+        this.aboard = !!m.plane;
+        this.z = m.plane ? m.plane.alt : 0;
+        // each bot picks its own moment, so fifteen of them land spread out
+        this.jumpAt = 0.4 + Math.random() * 7.5;
+        this.planeT = m.plane ? m.plane.t : 0;
+        if (this.i === 0) say(`[match] out over "${m.map}", seed ${m.seed}`);
+        break;
+      case 'jumped':
+        this.x = m.x; this.y = m.y; this.z = m.z;
+        this.aboard = false; this.falling = true; this.fallT = 0;
         break;
       case 'you':
         this.hp = m.hp; this.alive = m.alive; this.place = m.place; this.kills = m.kills;
@@ -98,6 +111,7 @@ class Bot {
     this.serverState = m.st;
     this.aliveCount = m.alive;
     if (m.r) { this.ring = { cx: m.r[0], cy: m.r[1], r: m.r[2], dps: m.r[9] }; }
+    if (m.pl) this.planeT = m.pl[0];
     for (const [id, x, y, a, hp, flags] of m.p) {
       if (id === this.id) continue;
       this.others.set(id, { x, y, hp, dead: !!(flags & 1), frozen: !!(flags & 8) });
@@ -119,10 +133,53 @@ class Bot {
     console.log(win ? `  winner: ${win.name}` : '  nobody left standing');
   }
 
+  // where the plane is now
+  planeAt(t) {
+    const g = this.plane;
+    const len = Math.hypot(g.x1 - g.x0, g.y1 - g.y0);
+    const dx = (g.x1 - g.x0) / len, dy = (g.y1 - g.y0) / len;
+    const d = Math.max(0, t) * g.speed;
+    return { x: g.x0 + dx * d, y: g.y0 + dy * d };
+  }
+
+  fallHeight(secs) {
+    const f = this.fall, alt = this.plane ? this.plane.alt : 24;
+    const toChute = (alt - f.chuteAt) / f.speed;
+    if (secs <= toChute) return alt - secs * f.speed;
+    return Math.max(0, f.chuteAt - (secs - toChute) * f.chuteSpeed);
+  }
+
+  // riding out and coming down
+  stepDrop(dt) {
+    this.planeT += dt;
+    if (this.aboard) {
+      const at = this.planeAt(this.planeT);
+      this.x = at.x; this.y = at.y;
+      if (this.planeT > this.jumpAt) this.send({ t: 'jump' });
+      this.send({ t: 'i', q: this.q, x: r2(this.x), y: r2(this.y), a: r2(this.a),
+        z: r2(this.z), c: 0, m: 0, w: this.weapon || 'shotgun' });
+      return;
+    }
+    this.fallT += dt;
+    this.z = this.fallHeight(this.fallT);
+    // steer towards somewhere on the map, no walls to worry about up here
+    if (!this.aimX) {
+      this.aimX = 8 + Math.random() * (C.w - 16);
+      this.aimY = 8 + Math.random() * (C.h - 16);
+    }
+    const sp = (this.z > this.fall.chuteAt ? 7 : 4.5) * dt;
+    const dx = this.aimX - this.x, dy = this.aimY - this.y, d = Math.hypot(dx, dy);
+    if (d > 0.1) { this.x += dx / d * Math.min(sp, d); this.y += dy / d * Math.min(sp, d); }
+    this.send({ t: 'i', q: this.q, x: r2(this.x), y: r2(this.y), a: r2(this.a),
+      z: r2(this.z), c: 0, m: 1, w: this.weapon || 'shotgun' });
+    if (this.z <= 0) { this.falling = false; this.landed = true; }
+  }
+
   // move, and shoot at anyone in sight
   step(dt) {
     if (this.closed) return;
     this.q++;
+    if (this.alive && (this.aboard || this.falling)) { this.stepDrop(dt); return; }
     if (this.alive) {
       if (this.frozen > 0) this.frozen -= dt;
       else {

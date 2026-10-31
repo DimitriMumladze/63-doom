@@ -395,6 +395,120 @@ const Hud = {
       'rgba(255,255,255,0.65)', 'center');
   },
 
+  // Riding out, and coming down. The 3D view behind this is the real map from
+  // altitude (see flatsFromAbove in engine.js); this is the furniture on top of it.
+  drawDrop(g, t) {
+    const aboard = BR.aboard;
+    if (aboard) this.drawDoorway(g);
+
+    // altitude, and the plane's run
+    const alt = BR.plane ? BR.plane.alt : 24;
+    this.text(g, aboard ? 'ALTITUDE ' + Math.round(alt) : 'ALTITUDE ' + Math.max(0, Math.round(BR.z)),
+      6, 6, 9, aboard ? '#bbb' : (BR.chuteOpen() ? MINT : '#ff9a6a'));
+    if (!aboard) {
+      this.text(g, BR.chuteOpen() ? 'CHUTE OPEN' : 'FREE FALL', 6, 18, 10,
+        BR.chuteOpen() ? MINT : '#ff9a6a');
+    }
+    this.text(g, BR.aboardN + ' STILL ABOARD', VW - 6, 6, 9, '#bbb', 'right');
+    this.text(g, BR.alive + ' IN THE MATCH', VW - 6, 18, 8, '#888', 'right');
+
+    this.drawDropMap(g);
+
+    if (aboard) {
+      if (BR.canJump()) {
+        if (Math.floor(t * 2) % 2 === 0) {
+          this.text(g, this.say('A TO JUMP', 'TAP TO JUMP', 'SPACE OR CLICK TO JUMP'),
+            VW / 2, VH - 42, 16, MINT, 'center');
+        }
+        this.text(g, 'pick your spot', VW / 2, VH - 24, 9, '#ddd', 'center');
+      } else {
+        this.text(g, 'DOORS CLOSED', VW / 2, VH - 42, 14, '#888', 'center');
+      }
+    } else {
+      this.text(g, this.say('L-STICK STEERS', 'DRAG TO STEER', 'WASD STEERS'),
+        VW / 2, VH - 24, 9, '#ddd', 'center');
+    }
+  },
+
+  // the inside of the doorway you are standing in, as a frame round the view
+  drawDoorway(g) {
+    const w = 46, h = 26;
+    g.fillStyle = 'rgba(10,10,14,0.92)';
+    g.fillRect(0, 0, w, VH);
+    g.fillRect(VW - w, 0, w, VH);
+    g.fillRect(0, 0, VW, h);
+    g.fillStyle = 'rgba(10,10,14,0.75)';
+    g.fillRect(0, VH - 14, VW, 14);
+    // ribs, so it reads as a fuselage and not a letterbox
+    g.fillStyle = 'rgba(70,70,86,0.9)';
+    for (let y = h; y < VH; y += 26) { g.fillRect(w - 6, y, 6, 3); g.fillRect(VW - w, y, 6, 3); }
+    g.fillRect(w - 3, 0, 3, VH);
+    g.fillRect(VW - w, 0, 3, VH);
+    g.fillRect(0, h - 3, VW, 3);
+    this.text(g, '63 BITS AIR', VW / 2, 9, 10, 'rgba(68,218,157,0.85)', 'center');
+  },
+
+  // The whole map, big, with the plane's line across it and where you would land.
+  // Same offscreen image the minimap uses.
+  drawDropMap(g) {
+    const L = Game.L, p = Game.player;
+    if (!L || !BR.plane) return;
+    if (this.mapFor !== L.name || !this.mapImg) this.buildMinimap(L);
+    const SIZE = 104;
+    const x0 = VW - SIZE - 8, y0 = VH - SIZE - 30;
+    const k = SIZE / Math.max(L.w, L.h);
+    const sx = v => x0 + v * k, sy = v => y0 + v * k;
+
+    g.fillStyle = 'rgba(8,8,12,0.8)';
+    g.fillRect(x0 - 2, y0 - 2, SIZE + 4, SIZE + 4);
+    g.save();
+    g.imageSmoothingEnabled = false;
+    g.globalAlpha = 0.9;
+    g.drawImage(this.mapImg, 0, 0, L.w, L.h, x0, y0, SIZE, SIZE);
+    g.globalAlpha = 1;
+
+    // the flight path, and how far along it the plane is
+    const pl = BR.plane;
+    g.strokeStyle = 'rgba(68,218,157,0.85)';
+    g.lineWidth = 1;
+    g.setLineDash([4, 3]);
+    g.beginPath();
+    g.moveTo(sx(pl.x0), sy(pl.y0));
+    g.lineTo(sx(pl.x1), sy(pl.y1));
+    g.stroke();
+    g.setLineDash([]);
+    const at = BR.planeAt(BR.planeT);
+    if (BR.aboard) {
+      g.fillStyle = MINT;
+      g.beginPath();
+      g.moveTo(sx(at.x) + at.dx * 5, sy(at.y) + at.dy * 5);
+      g.lineTo(sx(at.x) - at.dy * 3.5 - at.dx * 2, sy(at.y) + at.dx * 3.5 - at.dy * 2);
+      g.lineTo(sx(at.x) + at.dy * 3.5 - at.dx * 2, sy(at.y) - at.dx * 3.5 - at.dy * 2);
+      g.closePath();
+      g.fill();
+    }
+    // everyone already down or coming down
+    for (const r of Net.active()) {
+      if (r.aboard || r.dead) continue;
+      g.fillStyle = playerColor(r.slot);
+      g.fillRect(sx(r.x) - 1, sy(r.y) - 1, 2, 2);
+    }
+    // you
+    g.fillStyle = '#fff';
+    g.fillRect(sx(p.x) - 1.5, sy(p.y) - 1.5, 3, 3);
+    if (!BR.aboard) {
+      // a ring that closes as you come down, so the landing point is obvious
+      const alt = pl.alt;
+      g.strokeStyle = 'rgba(255,255,255,0.8)';
+      g.beginPath();
+      g.arc(sx(p.x), sy(p.y), 2 + 10 * (BR.z / alt), 0, Math.PI * 2);
+      g.stroke();
+    }
+    g.restore();
+    this.text(g, zoneAt(L, p.x, p.y).toUpperCase() || 'BURDZGLA ST.',
+      x0 + SIZE / 2, y0 - 12, 8, '#f4e7c0', 'center');
+  },
+
   // the lobby: who is in, which colleague you are, and whether you are ready
   drawBrLobby(g, t) {
     this.overlay(g, 0.6);
@@ -432,7 +546,11 @@ const Hud = {
     const ready = BR.roster.filter(e => e.ready).length;
     this.text(g, BR.ready ? 'YOU ARE READY' : this.say('A WHEN READY', 'TAP WHEN READY', 'ENTER WHEN READY'),
       VW / 2, SCREEN_H - 34, 14, BR.ready ? MINT : '#f4e7c0', 'center');
-    this.text(g, `${ready} of ${n} ready` + (taken.size ? '' : ''), VW / 2, SCREEN_H - 18, 8, '#999', 'center');
+    // it starts when everyone is ready, so name who it is waiting on
+    const slow = BR.roster.filter(e => !e.ready && !e.late).map(e => e.name);
+    this.text(g, slow.length ? 'WAITING ON ' + slow.slice(0, 4).join(', ').toUpperCase()
+      + (slow.length > 4 ? ' +' + (slow.length - 4) : '') : `all ${ready} ready`,
+      VW / 2, SCREEN_H - 18, 8, slow.length ? '#f0c040' : MINT, 'center');
     this.text(g, 'ESC leaves', 6, SCREEN_H - 14, 8, '#777');
   },
 

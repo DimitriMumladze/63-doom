@@ -92,7 +92,7 @@ const Net = {
   addRemote(id, slot, extra) {
     this.remotes[id] = Object.assign({ id, slot, remote: true, isPlayer: true, r: 0.24, hitR: 0.3,
       x: 0, y: 0, a: 0, z: 0, crouch: 0, hp: 100, dead: false, deadT: 0, on: false, moving: false,
-      weapon: 'pistol', shots: 0, shotT: 9, animT: 0, noise: 0,
+      weapon: 'pistol', shots: 0, shotT: 9, animT: 0, noise: 0, aboard: false,
       skin: PLAYER_SKIN, name: 'P' + slot, dup: false }, extra || {});
     return this.remotes[id];
   },
@@ -126,6 +126,11 @@ const Net = {
       case 'match': this.brMatch(m); break;
       case 'S': this.brSnap(m); break;
       case 'you': BR.onYou(m); break;
+      case 'jumped':
+        // the server has us out of the plane; it owns where from
+        if (G.player) { G.player.x = m.x; G.player.y = m.y; }
+        BR.aboard = false; BR.falling = true; BR.fallT = 0; BR.z = m.z;
+        break;
       case 'fix':
         // we were somewhere we could not have got to; the server wins
         if (G.player) { G.player.x = m.x; G.player.y = m.y; }
@@ -221,9 +226,11 @@ const Net = {
     BR.spawn = m.spawn;
     BR.kit = m.kit;
     BR.seed = m.seed;
-    BR.freeze = m.freeze || 0;
     BR.spectating = !!m.spectate;
-    BR.state = 'live';
+    BR.plane = m.plane || null;
+    BR.fall = m.fall || null;
+    BR.planeT = m.plane ? m.plane.t : 0;
+    BR.state = m.plane ? 'plane' : 'live';
     if (m.ring) BR.ring = Object.assign({ tx: m.ring.cx, ty: m.ring.cy, tr: m.ring.r,
       phase: 0, shrinking: false, left: 0, dps: 0 }, m.ring);
     Main.onBrMatch();
@@ -236,6 +243,11 @@ const Net = {
     BR.stateT = m.ct;
     BR.alive = m.alive;
     BR.onRing(m.r);
+    if (m.pl) {
+      // the plane's own clock wins over ours, which only runs between snapshots
+      if (Math.abs(m.pl[0] - BR.planeT) > 0.25) BR.planeT = m.pl[0];
+      BR.aboardN = m.pl[1];
+    }
     const here = {};
     for (const [id, x, y, a, hp, flags, shots, wIdx, z] of m.p) {
       here[id] = true;
@@ -250,6 +262,7 @@ const Net = {
       r.moving = !!(flags & 2);
       r.crouch = (flags & 4) ? 1 : 0;
       r.frozen = !!(flags & 8);
+      r.aboard = !!(flags & 16);
       const w = Rules_wname(wIdx);
       if (w) r.weapon = w;
       // their gun went off: you hear it, and so do you know roughly where they are
@@ -379,7 +392,8 @@ const Net = {
     const p = Game.player;
     if (!p) return;
     this.q++;
-    this.send({ t: 'i', q: this.q, x: r2(p.x), y: r2(p.y), a: r2(p.a), z: r2(p.z),
+    const z = BR.aboard || BR.falling ? BR.z : p.z;
+    this.send({ t: 'i', q: this.q, x: r2(p.x), y: r2(p.y), a: r2(p.a), z: r2(z),
       c: r2(p.crouch), m: p.moving ? 1 : 0, w: p.weapon });
   },
 };

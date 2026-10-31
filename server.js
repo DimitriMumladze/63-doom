@@ -215,7 +215,19 @@ const PLAYER_R = 0.24;
 // player hugging a corner hit it constantly.
 const CHECK_R = PLAYER_R - 0.01;
 const RUN_SPEED = 5.2;             // see Game.updatePlayer; the fastest anyone can legitimately go
-const DROP_FREEZE = 2.5;           // seconds of "the lift doors open": can't move, can't be shot
+// The drop. Everyone rides out over the block and jumps when they like; the plane
+// crosses in about eight seconds, so the last one out lands a long way from the first.
+const PLANE_ALT = 24;              // units up -- twelve times a wall, and the whole map in view
+const PLANE_SPEED = 13;            // cells a second
+const PLANE_LEAD = 1.5;            // seconds of flying before the doors open
+const FALL_SPEED = 9;              // units a second in free fall
+const CHUTE_AT = 8;                // the chute opens at this height
+const CHUTE_SPEED = 3;             // and slows the rest of it to this
+const DROP_CAP = 30;               // nobody may still be airborne this long after the first jump
+// A moment's grace on landing: nobody can shoot you and you cannot shoot, so two
+// people who came down together are not decided by whose chute folded first. It does
+// NOT hold you still -- see the note in input().
+const LAND_GRACE = 1.0;
 const COUNTDOWN = 5;               // short: being ready is what gates the start now
 const OVER_HOLD = 20;              // the results screen, before everyone goes back to the lobby
 // The match starts when everyone is ready. This is only a backstop, so that one
@@ -256,6 +268,8 @@ const BR = {
   players: new Map(),              // id -> player record (its .conn is the socket)
   ring: null,                      // see startRing()
   ringT: 0,
+  plane: null,                     // see startPlane(); null except during the drop
+  dropT: 0,                        // seconds since the first person jumped
   feed: [],                        // events to put in the next snapshot
   dead: [],                        // finishing order, worst first
 
@@ -272,6 +286,7 @@ const BR = {
       ready: false,
       x: 0, y: 0, a: 0, z: 0, crouch: 0, moving: false, weapon: START_KIT.weapon, shots: 0,
       hp: 100, armor: 0, alive: false, kills: 0, place: 0, frozen: 0,
+      aboard: false, fellAt: 0, landed: true,
       hist: [], lastShot: {}, at: Date.now(), rtt: 0, qAt: 0, spec: 0, late: false,
     };
     this.players.set(p.id, p);
@@ -293,12 +308,13 @@ const BR = {
     if (!p) return;
     this.players.delete(c.id);
     // walking out mid-match is a death, so the placings still add up
-    if (this.state === 'live' && p.alive) this.kill(p, null, '');
+    if ((this.state === 'live' || this.state === 'plane') && p.alive) this.kill(p, null, '');
     log(`${p.name} left the battle royale, ${this.players.size} in`);
     this.say(`${p.name} went home.`);
     this.pushLobby();
     updateLobby();
     if (this.state !== 'lobby' && this.living().length === 0) this.finish();
+    else if (this.state === 'plane' && !this.living().some(q => q.aboard || q.z > 0)) this.goLive();
   },
 
   // the skin they asked for if nobody has it, otherwise the first spare. Fifteen
@@ -330,6 +346,7 @@ const BR = {
       case 'name': p.name = cleanName(m.name, p.slot); this.pushLobby(); break;
       case 'i': this.input(p, m); break;
       case 'shot': this.shot(p, m); break;
+      case 'jump': this.jump(p); break;
       case 'spec': if (!p.alive && this.players.has(m.id)) p.spec = m.id; break;
     }
   },
@@ -344,15 +361,54 @@ const BR = {
     if (!p.alive) return;
     const nx = +m.x, ny = +m.y;
     p.a = Number.isFinite(+m.a) ? +m.a : p.a;
-    p.z = Math.max(0, Math.min(2, +m.z || 0));
     p.crouch = Math.max(0, Math.min(1, +m.c || 0));
     p.moving = !!m.m;
     if (Rules.WEAPONS[m.w]) p.weapon = m.w;
     if (!Number.isFinite(nx) || !Number.isFinite(ny)) return;
-    if (p.frozen > 0) return;        // still coming in: they cannot move yet, so do not correct them
+
+    // riding out: the plane says where they are, not them
+    if (p.aboard) {
+      const at = this.planeAt(this.plane.t);
+      p.x = at.x; p.y = at.y; p.z = this.plane.alt;
+      return;
+    }
 
     const dt = Math.max(0.05, Math.min(2.5, (now - p.at) / 1000));
     p.at = now;
+
+    // Coming down. Height is checked against the descent curve rather than taken on
+    // trust, horizontal movement gets the steering allowance, and there is no wall
+    // test while they are above the walls, because they are above them.
+    //
+    // The test is p.landed, not the match phase: the first one down is walking around
+    // while the last is still in the air, and asking the phase put everyone who had
+    // already landed back through this on every tick.
+    if (!p.landed) {
+      const want = this.fallHeight(p.fellAt ? (now - p.fellAt) / 1000 : 0);
+      const z = Math.max(0, Math.min(PLANE_ALT, +m.z || 0));
+      p.z = Math.abs(z - want) > 6 ? want : z;              // a long way off: the curve wins
+      // The first word after jumping gets room. Both sides put you at the plane's
+      // position when you left it, but they read its clock a round trip apart, and at
+      // 13 cells a second that is a few cells of honest disagreement -- the client's
+      // reading is the one the player saw, so it wins.
+      const justOut = p.fellAt && now - p.fellAt < 400;
+      const steer = justOut ? PLANE_SPEED * 0.5 + 2
+        : (p.z > CHUTE_AT ? 7 : 4.5) * dt * 1.8 + 0.5;
+      const moved = Math.hypot(nx - p.x, ny - p.y);
+      if (moved > steer) { this.fixes.fast++; this.correct(p); return; }
+      p.x = nx; p.y = ny;
+      if (p.z <= 0) this.land(p);
+      p.hist.push([now, p.x, p.y]);
+      while (p.hist.length > 2 && now - p.hist[0][0] > 600) p.hist.shift();
+      return;
+    }
+
+    p.z = Math.max(0, Math.min(2, +m.z || 0));
+    // On the ground. Note there is no "and frozen players may not move" here, which
+    // there used to be: the grace period after landing is damage immunity, not a
+    // freeze, and the client was never told about it. It walked off the moment it
+    // touched down, and a second later the first non-frozen input was a second's worth
+    // of running away from where the server still had it -- a snap back, every landing.
     const reach = RUN_SPEED * dt * 1.8 + 0.5;                // generous: bad wifi is not cheating
     const moved = Math.hypot(nx - p.x, ny - p.y);
     if (moved > reach) { this.fixes.fast++; this.correct(p); return; }
@@ -390,7 +446,7 @@ const BR = {
   // shotgun blast that catches two people is still one pull of one trigger, and
   // rate-limiting it per message would otherwise throw the second victim away.
   shot(p, m) {
-    if (this.state !== 'live' || !p.alive || p.frozen > 0) return;
+    if (this.state !== 'live' || !p.alive || p.frozen > 0 || p.aboard || p.z > 0) return;
     const name = m.w;
     const w = Rules.WEAPONS[name];
     if (!w) return;
@@ -407,6 +463,7 @@ const BR = {
       if (budget <= 0) break;
       const victim = this.players.get(Array.isArray(claim) ? claim[0] : claim);
       if (!victim || victim === p || !victim.alive || victim.frozen > 0) continue;
+      if (victim.aboard || victim.z > 0) continue;          // not while they are in the air
       // where they were when the shooter saw them, not where they are now
       const [vx, vy] = this.rewind(victim, back);
       const d = Math.hypot(vx - p.x, vy - p.y);
@@ -454,11 +511,12 @@ const BR = {
     this.match++;
     this.seed = (Date.now() ^ (this.match * 2654435761)) >>> 0;
     const rnd = mulberry32(this.seed);
-    this.state = 'live';
+    this.state = 'plane';
     this.t = 0;
     this.feed = [];
     this.dead = [];
     this.startRing(rnd);
+    this.startPlane(rnd);
     this.sent = 0; this.tickMs = 0; this.tickPeak = 0; this.reportT = 0;
 
     // Who is actually in it. Anyone not ready when it went watches this one and is in
@@ -471,29 +529,20 @@ const BR = {
     }
     this.started = playing.length;
 
-    // spread them out: shuffle the spawns, then keep picking the one furthest from
-    // everybody already placed
-    const spots = Rules.C.spawns.slice();
-    for (let i = spots.length - 1; i > 0; i--) {
-      const j = Math.floor(rnd() * (i + 1));
-      [spots[i], spots[j]] = [spots[j], spots[i]];
-    }
-    const taken = [];
+    // Everyone starts on the plane. Where they end up is their own choice, which is
+    // the point of it, so there are no spawn points to hand out any more.
+    const at = this.planeAt(0);
     for (const p of playing) {
-      let best = spots[0], bestD = -1;
-      for (const s of spots) {
-        if (taken.includes(s)) continue;
-        let near = Infinity;
-        for (const u of taken) near = Math.min(near, Math.hypot(s.x - u.x, s.y - u.y));
-        if (near > bestD) { bestD = near; best = s; }
-      }
-      taken.push(best);
-      p.x = best.x; p.y = best.y; p.a = best.a;
-      p.z = 0; p.crouch = 0; p.moving = false;
+      p.aboard = true;
+      p.fellAt = 0;
+      p.landed = false;
+      p.x = at.x; p.y = at.y; p.z = PLANE_ALT;
+      p.a = Math.atan2(this.plane.dy, this.plane.dx);
+      p.crouch = 0; p.moving = false;
       p.hp = 100; p.armor = 0; p.alive = true; p.kills = 0; p.place = 0;
       p.weapon = START_KIT.weapon;
       p.ammo = Object.assign({}, START_KIT.ammo);
-      p.frozen = DROP_FREEZE;
+      p.frozen = 0;
       p.hist = [[Date.now(), p.x, p.y]];
       p.lastShot = {};
       p.at = Date.now();
@@ -504,6 +553,153 @@ const BR = {
       (this.players.size > playing.length ? ` (${this.players.size - playing.length} watching)` : '') +
       `, seed ${this.seed}`);
     updateLobby();
+  },
+
+  // ---------------- the plane ----------------
+  // A chord across the map through somewhere near the middle, on a bearing drawn from
+  // the match seed. Sent to the clients as four numbers rather than derived from the
+  // seed on both sides: everything about the drop is positions along this line, and
+  // the two must agree exactly.
+  startPlane(rnd) {
+    const C = Rules.C;
+    const ang = rnd() * Math.PI * 2;
+    // a point in the middle third, so the path always crosses somewhere worth landing
+    const mx = C.w * (0.34 + rnd() * 0.32), my = C.h * (0.34 + rnd() * 0.32);
+    const dx = Math.cos(ang), dy = Math.sin(ang);
+    // Clipped to the map, not run out to some length that clears it. The run has to
+    // begin and end over ground you can land on, because the jump puts you at the
+    // plane's position -- and an unclipped chord had the doors opening thirty cells
+    // off the edge, where the client clamps you to the border and the server does not.
+    const inset = 3;
+    let t0 = -Infinity, t1 = Infinity;
+    for (const [o, d, lo, hi] of [[mx, dx, inset, C.w - inset], [my, dy, inset, C.h - inset]]) {
+      if (Math.abs(d) < 1e-9) continue;               // parallel to this pair of edges
+      const a = (lo - o) / d, b = (hi - o) / d;
+      t0 = Math.max(t0, Math.min(a, b));
+      t1 = Math.min(t1, Math.max(a, b));
+    }
+    const len = Math.max(8, t1 - t0);
+    this.plane = {
+      x0: mx + dx * t0, y0: my + dy * t0,
+      x1: mx + dx * t1, y1: my + dy * t1,
+      dx, dy, len, alt: PLANE_ALT, speed: PLANE_SPEED,
+      t: -PLANE_LEAD,                                 // negative while the doors are shut
+    };
+    this.dropT = 0;
+  },
+
+  // where the plane is now, never past the end of its run
+  planeAt(t) {
+    const g = this.plane;
+    const d = Math.max(0, Math.min(g.len, Math.max(0, t) * g.speed));
+    return { x: g.x0 + g.dx * d, y: g.y0 + g.dy * d, t };
+  },
+
+  // how long until it leaves the map
+  planeDone() { return this.plane.t * this.plane.speed > this.plane.len; },
+
+  jump(p) {
+    if (this.state !== 'plane' || !p.aboard || p.late) return;
+    const at = this.planeAt(Math.min(this.plane.t, this.plane.len / this.plane.speed));
+    p.aboard = false;
+    p.z = this.plane.alt;
+    p.x = at.x; p.y = at.y;
+    p.hist = [[Date.now(), p.x, p.y]];
+    p.at = Date.now();
+    p.fellAt = Date.now();                            // their own fall clock, not a shared one
+    if (!this.dropT) this.dropT = 0.001;              // this one is only for the overall cap
+    send(p.conn, { t: 'jumped', x: r2(p.x), y: r2(p.y), z: p.z });
+  },
+
+  // how high someone should be, this long after leaving the plane
+  fallHeight(secs) {
+    const toChute = (PLANE_ALT - CHUTE_AT) / FALL_SPEED;
+    if (secs <= toChute) return PLANE_ALT - secs * FALL_SPEED;
+    return Math.max(0, CHUTE_AT - (secs - toChute) * CHUTE_SPEED);
+  },
+
+  dropSecs() { return (PLANE_ALT - CHUTE_AT) / FALL_SPEED + CHUTE_AT / CHUTE_SPEED; },
+
+  stepPlane(dt) {
+    const g = this.plane;
+    if (!g) return;
+    g.t += dt;
+    // anyone still aboard when it runs out of map is pushed out
+    if (this.planeDone()) {
+      for (const p of this.players.values()) if (p.aboard && !p.late) this.jump(p);
+    }
+    if (this.dropT) this.dropT += dt;
+
+    let airborne = 0;
+    for (const p of this.players.values()) {
+      if (p.late || !p.alive) continue;
+      if (p.aboard) { airborne++; continue; }
+      if (p.z > 0) airborne++;
+    }
+    // everyone down, or long enough that someone has clearly stopped answering
+    if (!airborne || (this.dropT && this.dropT > DROP_CAP)) this.goLive();
+  },
+
+  goLive() {
+    let forced = 0;
+    for (const p of this.players.values()) {
+      if (p.late || !p.alive) continue;
+      if (p.aboard || p.z > 0) { this.land(p); forced++; }   // put down whoever is still up
+    }
+    const secs = this.t || 0.001;
+    log(`  drop over after ${secs.toFixed(0)}s: ${this.started} away` +
+      (forced ? `, ${forced} put down` : '') +
+      `  |  ${(this.sent / secs / 1024).toFixed(1)} KB/s out, ` +
+      `${(this.tickMs / (secs * HZ)).toFixed(2)} ms/tick avg, ${this.tickPeak.toFixed(1)} peak` +
+      `, snapped back ${this.fixes.fast}`);
+    this.plane = null;
+    this.state = 'live';
+    this.t = 0;
+    // the counters only report during 'live', and this.t restarts here, so anything
+    // accumulated during the drop would be divided by live seconds and read double
+    this.reportT = 0;
+    this.sent = 0; this.tickMs = 0; this.tickPeak = 0;
+    this.fixes.fast = 0; this.fixes.wall = 0;
+    this.say('Everyone down. Last one standing.');
+  },
+
+  // Feet on the ground. If they came down on something they cannot stand on, move them
+  // to the nearest cell they can and tell them -- CHECK_R, not PLAYER_R, for the same
+  // reason the ground check uses it.
+  land(p) {
+    if (p.landed) return;
+    p.landed = true;
+    p.aboard = false;
+    p.z = 0;
+    // came down on a wall or a parked car: put them on the nearest cell they can
+    // stand on, and only then tell them, since a correction they do not need is a
+    // snap they did not deserve
+    if (!Rules.freeCircle(Rules.C, p.x, p.y, CHECK_R)) {
+      const spot = this.nearestStanding(p.x, p.y);
+      p.x = spot.x; p.y = spot.y;
+      this.correct(p);
+    }
+    p.frozen = LAND_GRACE;
+    p.hist = [[Date.now(), p.x, p.y]];
+    p.at = Date.now();
+  },
+
+  nearestStanding(x, y) {
+    const C = Rules.C;
+    for (let rad = 1; rad < 20; rad++) {
+      let best = null, bd = Infinity;
+      for (let dy = -rad; dy <= rad; dy++) {
+        for (let dx = -rad; dx <= rad; dx++) {
+          if (Math.max(Math.abs(dx), Math.abs(dy)) !== rad) continue;
+          const cx = Math.floor(x) + dx, cy = Math.floor(y) + dy;
+          if (!Rules.freeCircle(C, cx + 0.5, cy + 0.5, CHECK_R)) continue;
+          const d = (cx + 0.5 - x) ** 2 + (cy + 0.5 - y) ** 2;
+          if (d < bd) { bd = d; best = { x: cx + 0.5, y: cy + 0.5 }; }
+        }
+      }
+      if (best) return best;
+    }
+    return { x: C.w / 2, y: C.h / 2 };
   },
 
   // ---------------- the ring ----------------
@@ -584,9 +780,14 @@ const BR = {
   },
 
   matchMsg(p) {
+    const g = this.plane;
     return { t: 'match', seed: this.seed, map: Rules.spec.name, at: this.t,
       spawn: p.late ? null : { x: r2(p.x), y: r2(p.y), a: r2(p.a) },
-      freeze: p.late ? 0 : DROP_FREEZE, spectate: !!p.late,
+      spectate: !!p.late,
+      // the flight, so the client can fly the same line and know when to let you out
+      plane: g && !p.late ? { x0: r2(g.x0), y0: r2(g.y0), x1: r2(g.x1), y1: r2(g.y1),
+        alt: g.alt, speed: g.speed, t: r2(g.t), lead: PLANE_LEAD } : null,
+      fall: { speed: FALL_SPEED, chuteAt: CHUTE_AT, chuteSpeed: CHUTE_SPEED },
       kit: { weapon: START_KIT.weapon, has: START_KIT.has, ammo: START_KIT.ammo },
       ring: this.ring ? { cx: r2(this.ring.cx), cy: r2(this.ring.cy), r: r2(this.ring.r) } : null,
       phases: RING_PHASES.length };
@@ -683,6 +884,9 @@ const BR = {
         this.say('Not enough people. Waiting.');
       }
       else if (this.t >= COUNTDOWN) this.startMatch();
+    } else if (this.state === 'plane') {
+      for (const p of this.players.values()) if (p.frozen > 0) p.frozen -= dt;
+      mark('plane', () => this.stepPlane(dt));
     } else if (this.state === 'live') {
       for (const p of this.players.values()) if (p.frozen > 0) p.frozen -= dt;
       mark('ring', () => this.stepRing(dt));
@@ -697,6 +901,7 @@ const BR = {
       if (this.tick % HZ === 0) this.pushLobby();          // once a second is plenty
       return;
     }
+    if (this.state === 'plane') { mark('snap', () => this.snapshot()); return; }
     mark('snap', () => this.snapshot());
   },
 
@@ -712,12 +917,16 @@ const BR = {
       if (q.moving) flags |= 2;
       if (q.crouch > 0.5) flags |= 4;
       if (q.frozen > 0) flags |= 8;
+      if (q.aboard) flags |= 16;
       p.push([q.id, r2(q.x), r2(q.y), r2(q.a), Math.ceil(q.hp), flags, q.shots,
         Rules.wnames.indexOf(q.weapon), q.z ? r2(q.z) : 0]);
     }
     const g = this.ring;
+    const pl = this.plane;
     const m = { t: 'S', q: this.tick, st: this.state, ct: r2(this.t),
       alive: this.living().length, p, e: this.feed,
+      // how far along its run the plane is, and how many have not jumped yet
+      pl: pl ? [r2(pl.t), [...this.players.values()].filter(q => q.aboard && !q.late).length] : null,
       // where the gas line is now, where it is going, and what it costs to be outside
       r: g ? [r2(g.cx), r2(g.cy), r2(g.r), r2(g.tx), r2(g.ty), r2(g.tr),
         g.phase, g.mode === 'shrink' ? 1 : 0, r2(Math.max(0, g.left)), g.dps] : null };

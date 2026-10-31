@@ -85,8 +85,10 @@ function makeClient(i) {
     onBrMatch() {
       this.matches++;
       refs.Game.start('br');
-      this.setState(refs.BR.spectating ? 'spectate' : 'play');
+      this.setState(refs.BR.spectating ? 'spectate'
+        : (refs.BR.plane ? 'plane' : 'play'));
     },
+    onLanded() { if (this.state === 'plane' || this.state === 'drop') this.setState('play'); },
     onBrEnd() { this.ends++; this.setState('results'); },
     lock() {}, fullscreen() {}, onWin() {}, restart() {},
   };
@@ -159,6 +161,26 @@ const loop = setInterval(() => {
         Net.send({ t: 'ready', v: 1 });
         BR.ready = true;
       }
+      // --- the plane and the fall, through the real BR code ---
+      if (sandbox.Main.state === 'plane' || sandbox.Main.state === 'drop') {
+        c.seen.plane = true;
+        if (BR.falling) c.seen.falling = true;
+        // each one picks its own moment, so they land spread out
+        if (c.jumpAt === undefined) c.jumpAt = 0.5 + (c.i % 8) * 0.9;
+        if (BR.aboard && BR.planeT > c.jumpAt) BR.jump();
+        // steer somewhere, which BR.updateDrop reads off the input stub
+        if (BR.falling) {
+          sandbox.Input.keys.KeyW = true;
+          if (c.i % 2) sandbox.Input.keys.KeyD = true;
+        }
+        BR.updateDrop(DT);
+        if (BR.z > 0 && !Number.isFinite(BR.z)) note(`client ${c.i} has a non-finite height`);
+        Net.update(DT);
+        continue;
+      }
+      sandbox.Input.keys.KeyW = false;
+      sandbox.Input.keys.KeyD = false;
+
       // --- playing: wander and shoot, through the real Game code ---
       if (sandbox.Main.state === 'play' && Game.player && !Game.player.dead) {
         c.seen.play = true;
@@ -171,8 +193,7 @@ const loop = setInterval(() => {
           d = Math.atan2(Math.sin(d), Math.cos(d));
           p.a += Math.max(-0.15, Math.min(0.15, d * 0.3));
         } else p.a += c.turn * DT;
-        if (BR.freeze > 0) BR.freeze -= DT;
-        else {
+        {
           const sp = 3.6 * DT;
           Game.move(p, Math.cos(p.a) * sp, Math.sin(p.a) * sp);
           p.moving = true;
@@ -180,12 +201,17 @@ const loop = setInterval(() => {
         // fire through the real path: Game.fire -> hitscan -> {t:'shot'}
         p.fireT -= DT; p.shotT += DT;
         const w = c.refs.WEAPONS[p.weapon];
-        if (p.fireT <= 0 && BR.freeze <= 0 && p.ammo[w.ammo] >= (w.use || 1)) {
+        if (p.fireT <= 0 && p.ammo[w.ammo] >= (w.use || 1)) {
           // only bother when someone is actually in view, like a person would
           const target = Net.active().find(r => !r.dead
             && Math.hypot(r.x - p.x, r.y - p.y) < 14 && Game.sees(p.x, p.y, r.x, r.y));
           if (target) {
             p.a = Math.atan2(target.y - p.y, target.x - p.x);
+            Game.fire(w);
+            c.seen.fired = true;
+          } else if (c.tick % 50 === 0) {
+            // eight of them on a 96x96 map rarely meet, and the shot path still has
+            // to be walked: fire at nothing now and then
             Game.fire(w);
             c.seen.fired = true;
           }
@@ -240,6 +266,7 @@ function report(done) {
     const s = c.seen;
     console.log(`  client ${String(c.i).padStart(2)}  ${c.BR.myName || '?'}  ` +
       `lobby:${s.lobby ? 'y' : '-'} play:${s.play ? 'y' : '-'} fired:${s.fired ? 'y' : '-'} ` +
+      `plane:${s.plane ? 'y' : '-'} fell:${s.falling ? 'y' : '-'} ` +
       `dead:${s.dead ? 'y' : '-'} spec:${s.spectate ? 'y' : '-'} results:${s.results ? 'y' : '-'}  ` +
       `#${c.BR.place || '-'} ${c.BR.kills} kills  feed:${c.BR.feed.length}`);
   }
@@ -251,7 +278,7 @@ function report(done) {
   const ring = c0.BR.ring;
   console.log(ring ? `  ring ended at (${ring.cx.toFixed(1)}, ${ring.cy.toFixed(1)}) r=${ring.r.toFixed(1)}` +
     ` phase ${ring.phase + 1}, ${ring.dps}/s outside` : '  no ring state');
-  for (const want of ['lobby', 'play', 'fired']) {
+  for (const want of ['lobby', 'plane', 'falling', 'play', 'fired']) {
     if (!clients.some(c => c.seen[want])) note(`no client ever reached "${want}"`);
   }
   if (!clients.some(c => c.seen.dead)) note('nobody ever died');

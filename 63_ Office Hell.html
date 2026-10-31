@@ -2129,6 +2129,9 @@ const Modes = {
       Music.setIntensity(BR.ring && BR.outside ? 1 : Math.min(1, BR.nearbyFire / 2));
     },
 
+    // aboard and falling you are not on the ground, so none of the walking rules apply
+    airborne() { return BR.aboard || BR.falling; },
+
     // the other fifteen, each as their own colleague
     sprites(out) { BR.sprites(out); },
 
@@ -2149,7 +2152,13 @@ const BR = {
   ready: false, myName: '', mySkin: 'irakli', pick: 0,
 
   // the match
-  spawn: null, kit: null, seed: 0, freeze: 0, spectating: false,
+  spawn: null, kit: null, seed: 0, spectating: false,
+
+  // The drop. `plane` is the flight the server sent; `planeT` runs it forward between
+  // snapshots so the ride is smooth, and the server's `pl` corrects it 20 times a
+  // second. Aboard until you jump, then falling until z reaches nothing.
+  plane: null, planeT: 0, aboard: false, aboardN: 0,
+  falling: false, fallT: 0, z: 0, fall: null,
   alive: 0, started: 0, place: 0, kills: 0,
   ring: null,            // { cx, cy, r, tx, ty, tr, phase, shrinking, left, dps }
   outside: false, warnT: 0, nearbyFire: 0,
@@ -2161,12 +2170,100 @@ const BR = {
     this.ring = null; this.board = null; this.winner = 0;
     this.feed = []; this.outside = false; this.warnT = 0; this.nearbyFire = 0;
     this.place = 0; this.kills = 0; this.specId = 0; this.spectating = false;
+    this.aboard = false; this.falling = false; this.fallT = 0; this.z = 0;
+    this.plane = null; this.planeT = 0; this.aboardN = 0;
   },
 
   onMatchStart() {
+    const spectating = this.spectating;
+    const plane = this.plane, fall = this.fall, planeT = this.planeT;
     this.reset();
-    Game.say(this.spectating ? 'Match in progress. Watching until the next one.'
-      : 'The lift doors open. Fifteen of you. One stays.');
+    this.spectating = spectating;
+    this.plane = plane; this.fall = fall; this.planeT = planeT;
+    if (!spectating && plane) {
+      this.aboard = true;
+      this.z = plane.alt;
+      Game.say('Out over Burdzgla St. Jump when you like.');
+    } else {
+      Game.say(spectating ? 'Match in progress. Watching until the next one.'
+        : 'The lift doors open.');
+    }
+  },
+
+  // ---------------- the drop ----------------
+  // where the plane is, this far into its run
+  planeAt(t) {
+    const g = this.plane;
+    const len = Math.hypot(g.x1 - g.x0, g.y1 - g.y0);
+    const dx = (g.x1 - g.x0) / len, dy = (g.y1 - g.y0) / len;
+    // never past the end of the run, the same clamp the server applies
+    const d = Math.max(0, Math.min(len, Math.max(0, t) * g.speed));
+    return { x: g.x0 + dx * d, y: g.y0 + dy * d, dx, dy, len };
+  },
+
+  // the doors are shut for the first moment, so nobody jumps before the map
+  canJump() { return this.aboard && this.plane && this.planeT > 0; },
+
+  jump() {
+    if (!this.canJump()) return;
+    const at = this.planeAt(this.planeT);
+    this.aboard = false;
+    this.falling = true;
+    this.fallT = 0;
+    this.z = this.plane.alt;
+    const p = Game.player;
+    p.x = at.x; p.y = at.y;
+    p.a = Math.atan2(at.dy, at.dx);
+    Net.send({ t: 'jump' });
+    Sound.play('jump');
+    Game.say('Out. Steer.');
+  },
+
+  // the height the server will expect, so the two never drift apart
+  fallHeight(secs) {
+    const f = this.fall || { speed: 9, chuteAt: 8, chuteSpeed: 3 };
+    const alt = this.plane ? this.plane.alt : 24;
+    const toChute = (alt - f.chuteAt) / f.speed;
+    if (secs <= toChute) return alt - secs * f.speed;
+    return Math.max(0, f.chuteAt - (secs - toChute) * f.chuteSpeed);
+  },
+
+  chuteOpen() { return this.falling && this.z <= (this.fall ? this.fall.chuteAt : 8); },
+
+  // Riding and falling, run on the client so both are smooth; the server's snapshot
+  // pulls the plane back into line and owns the moment of landing.
+  updateDrop(dt) {
+    if (this.plane) this.planeT += dt;
+    const p = Game.player;
+    if (this.aboard) {
+      const at = this.planeAt(this.planeT);
+      p.x = at.x; p.y = at.y;
+      this.z = this.plane.alt;
+      return;
+    }
+    if (!this.falling) return;
+    this.fallT += dt;
+    this.z = this.fallHeight(this.fallT);
+    // steer: the same keys as walking, faster in free fall than under the chute
+    const sp = (this.chuteOpen() ? 4.5 : 7) * dt;
+    const k = Input.keys, pad = Input.pad, tc = Input.touch;
+    const fwd = ((k.KeyW || k.ArrowUp) ? 1 : 0) - ((k.KeyS || k.ArrowDown) ? 1 : 0) - pad.ly - tc.ly;
+    const str = (k.KeyD ? 1 : 0) - (k.KeyA ? 1 : 0) + pad.lx + tc.lx;
+    const ca = Math.cos(p.a), sa = Math.sin(p.a);
+    let mx = ca * fwd - sa * str, my = sa * fwd + ca * str;
+    const ml = Math.hypot(mx, my);
+    if (ml > 0) {
+      // no walls up here, only the edge of the world
+      p.x = Math.max(0.6, Math.min(Game.L.w - 0.6, p.x + mx / ml * sp));
+      p.y = Math.max(0.6, Math.min(Game.L.h - 0.6, p.y + my / ml * sp));
+    }
+    if (this.z <= 0) {
+      this.falling = false;
+      this.z = 0;
+      Sound.play('land');
+      Game.say('Down. Find a gun.');
+      Main.onLanded();
+    }
   },
 
   // ---------------- the server's word on your own numbers ----------------
@@ -2227,6 +2324,7 @@ const BR = {
     const p = Game.player;
     for (const r of Net.active()) {
       if (r.dead && r.deadT > 6) continue;         // bodies stop being drawn eventually
+      if (r.aboard) continue;                      // still on the plane, nowhere to draw them
       const frame = r.dead ? 'death4' : r.shotT < 0.15 ? 'attack2'
         : r.moving ? ['walk1', 'walk2', 'walk3', 'walk2'][Math.floor(r.animT / 0.17) % 4] : 'idle';
       const tint = skinTint(r);
@@ -3706,7 +3804,7 @@ const Net = {
   addRemote(id, slot, extra) {
     this.remotes[id] = Object.assign({ id, slot, remote: true, isPlayer: true, r: 0.24, hitR: 0.3,
       x: 0, y: 0, a: 0, z: 0, crouch: 0, hp: 100, dead: false, deadT: 0, on: false, moving: false,
-      weapon: 'pistol', shots: 0, shotT: 9, animT: 0, noise: 0,
+      weapon: 'pistol', shots: 0, shotT: 9, animT: 0, noise: 0, aboard: false,
       skin: PLAYER_SKIN, name: 'P' + slot, dup: false }, extra || {});
     return this.remotes[id];
   },
@@ -3740,6 +3838,11 @@ const Net = {
       case 'match': this.brMatch(m); break;
       case 'S': this.brSnap(m); break;
       case 'you': BR.onYou(m); break;
+      case 'jumped':
+        // the server has us out of the plane; it owns where from
+        if (G.player) { G.player.x = m.x; G.player.y = m.y; }
+        BR.aboard = false; BR.falling = true; BR.fallT = 0; BR.z = m.z;
+        break;
       case 'fix':
         // we were somewhere we could not have got to; the server wins
         if (G.player) { G.player.x = m.x; G.player.y = m.y; }
@@ -3835,9 +3938,11 @@ const Net = {
     BR.spawn = m.spawn;
     BR.kit = m.kit;
     BR.seed = m.seed;
-    BR.freeze = m.freeze || 0;
     BR.spectating = !!m.spectate;
-    BR.state = 'live';
+    BR.plane = m.plane || null;
+    BR.fall = m.fall || null;
+    BR.planeT = m.plane ? m.plane.t : 0;
+    BR.state = m.plane ? 'plane' : 'live';
     if (m.ring) BR.ring = Object.assign({ tx: m.ring.cx, ty: m.ring.cy, tr: m.ring.r,
       phase: 0, shrinking: false, left: 0, dps: 0 }, m.ring);
     Main.onBrMatch();
@@ -3850,6 +3955,11 @@ const Net = {
     BR.stateT = m.ct;
     BR.alive = m.alive;
     BR.onRing(m.r);
+    if (m.pl) {
+      // the plane's own clock wins over ours, which only runs between snapshots
+      if (Math.abs(m.pl[0] - BR.planeT) > 0.25) BR.planeT = m.pl[0];
+      BR.aboardN = m.pl[1];
+    }
     const here = {};
     for (const [id, x, y, a, hp, flags, shots, wIdx, z] of m.p) {
       here[id] = true;
@@ -3864,6 +3974,7 @@ const Net = {
       r.moving = !!(flags & 2);
       r.crouch = (flags & 4) ? 1 : 0;
       r.frozen = !!(flags & 8);
+      r.aboard = !!(flags & 16);
       const w = Rules_wname(wIdx);
       if (w) r.weapon = w;
       // their gun went off: you hear it, and so do you know roughly where they are
@@ -3993,7 +4104,8 @@ const Net = {
     const p = Game.player;
     if (!p) return;
     this.q++;
-    this.send({ t: 'i', q: this.q, x: r2(p.x), y: r2(p.y), a: r2(p.a), z: r2(p.z),
+    const z = BR.aboard || BR.falling ? BR.z : p.z;
+    this.send({ t: 'i', q: this.q, x: r2(p.x), y: r2(p.y), a: r2(p.a), z: r2(z),
       c: r2(p.crouch), m: p.moving ? 1 : 0, w: p.weapon });
   },
 };
@@ -4401,6 +4513,120 @@ const Hud = {
       'rgba(255,255,255,0.65)', 'center');
   },
 
+  // Riding out, and coming down. The 3D view behind this is the real map from
+  // altitude (see flatsFromAbove in engine.js); this is the furniture on top of it.
+  drawDrop(g, t) {
+    const aboard = BR.aboard;
+    if (aboard) this.drawDoorway(g);
+
+    // altitude, and the plane's run
+    const alt = BR.plane ? BR.plane.alt : 24;
+    this.text(g, aboard ? 'ALTITUDE ' + Math.round(alt) : 'ALTITUDE ' + Math.max(0, Math.round(BR.z)),
+      6, 6, 9, aboard ? '#bbb' : (BR.chuteOpen() ? MINT : '#ff9a6a'));
+    if (!aboard) {
+      this.text(g, BR.chuteOpen() ? 'CHUTE OPEN' : 'FREE FALL', 6, 18, 10,
+        BR.chuteOpen() ? MINT : '#ff9a6a');
+    }
+    this.text(g, BR.aboardN + ' STILL ABOARD', VW - 6, 6, 9, '#bbb', 'right');
+    this.text(g, BR.alive + ' IN THE MATCH', VW - 6, 18, 8, '#888', 'right');
+
+    this.drawDropMap(g);
+
+    if (aboard) {
+      if (BR.canJump()) {
+        if (Math.floor(t * 2) % 2 === 0) {
+          this.text(g, this.say('A TO JUMP', 'TAP TO JUMP', 'SPACE OR CLICK TO JUMP'),
+            VW / 2, VH - 42, 16, MINT, 'center');
+        }
+        this.text(g, 'pick your spot', VW / 2, VH - 24, 9, '#ddd', 'center');
+      } else {
+        this.text(g, 'DOORS CLOSED', VW / 2, VH - 42, 14, '#888', 'center');
+      }
+    } else {
+      this.text(g, this.say('L-STICK STEERS', 'DRAG TO STEER', 'WASD STEERS'),
+        VW / 2, VH - 24, 9, '#ddd', 'center');
+    }
+  },
+
+  // the inside of the doorway you are standing in, as a frame round the view
+  drawDoorway(g) {
+    const w = 46, h = 26;
+    g.fillStyle = 'rgba(10,10,14,0.92)';
+    g.fillRect(0, 0, w, VH);
+    g.fillRect(VW - w, 0, w, VH);
+    g.fillRect(0, 0, VW, h);
+    g.fillStyle = 'rgba(10,10,14,0.75)';
+    g.fillRect(0, VH - 14, VW, 14);
+    // ribs, so it reads as a fuselage and not a letterbox
+    g.fillStyle = 'rgba(70,70,86,0.9)';
+    for (let y = h; y < VH; y += 26) { g.fillRect(w - 6, y, 6, 3); g.fillRect(VW - w, y, 6, 3); }
+    g.fillRect(w - 3, 0, 3, VH);
+    g.fillRect(VW - w, 0, 3, VH);
+    g.fillRect(0, h - 3, VW, 3);
+    this.text(g, '63 BITS AIR', VW / 2, 9, 10, 'rgba(68,218,157,0.85)', 'center');
+  },
+
+  // The whole map, big, with the plane's line across it and where you would land.
+  // Same offscreen image the minimap uses.
+  drawDropMap(g) {
+    const L = Game.L, p = Game.player;
+    if (!L || !BR.plane) return;
+    if (this.mapFor !== L.name || !this.mapImg) this.buildMinimap(L);
+    const SIZE = 104;
+    const x0 = VW - SIZE - 8, y0 = VH - SIZE - 30;
+    const k = SIZE / Math.max(L.w, L.h);
+    const sx = v => x0 + v * k, sy = v => y0 + v * k;
+
+    g.fillStyle = 'rgba(8,8,12,0.8)';
+    g.fillRect(x0 - 2, y0 - 2, SIZE + 4, SIZE + 4);
+    g.save();
+    g.imageSmoothingEnabled = false;
+    g.globalAlpha = 0.9;
+    g.drawImage(this.mapImg, 0, 0, L.w, L.h, x0, y0, SIZE, SIZE);
+    g.globalAlpha = 1;
+
+    // the flight path, and how far along it the plane is
+    const pl = BR.plane;
+    g.strokeStyle = 'rgba(68,218,157,0.85)';
+    g.lineWidth = 1;
+    g.setLineDash([4, 3]);
+    g.beginPath();
+    g.moveTo(sx(pl.x0), sy(pl.y0));
+    g.lineTo(sx(pl.x1), sy(pl.y1));
+    g.stroke();
+    g.setLineDash([]);
+    const at = BR.planeAt(BR.planeT);
+    if (BR.aboard) {
+      g.fillStyle = MINT;
+      g.beginPath();
+      g.moveTo(sx(at.x) + at.dx * 5, sy(at.y) + at.dy * 5);
+      g.lineTo(sx(at.x) - at.dy * 3.5 - at.dx * 2, sy(at.y) + at.dx * 3.5 - at.dy * 2);
+      g.lineTo(sx(at.x) + at.dy * 3.5 - at.dx * 2, sy(at.y) - at.dx * 3.5 - at.dy * 2);
+      g.closePath();
+      g.fill();
+    }
+    // everyone already down or coming down
+    for (const r of Net.active()) {
+      if (r.aboard || r.dead) continue;
+      g.fillStyle = playerColor(r.slot);
+      g.fillRect(sx(r.x) - 1, sy(r.y) - 1, 2, 2);
+    }
+    // you
+    g.fillStyle = '#fff';
+    g.fillRect(sx(p.x) - 1.5, sy(p.y) - 1.5, 3, 3);
+    if (!BR.aboard) {
+      // a ring that closes as you come down, so the landing point is obvious
+      const alt = pl.alt;
+      g.strokeStyle = 'rgba(255,255,255,0.8)';
+      g.beginPath();
+      g.arc(sx(p.x), sy(p.y), 2 + 10 * (BR.z / alt), 0, Math.PI * 2);
+      g.stroke();
+    }
+    g.restore();
+    this.text(g, zoneAt(L, p.x, p.y).toUpperCase() || 'BURDZGLA ST.',
+      x0 + SIZE / 2, y0 - 12, 8, '#f4e7c0', 'center');
+  },
+
   // the lobby: who is in, which colleague you are, and whether you are ready
   drawBrLobby(g, t) {
     this.overlay(g, 0.6);
@@ -4438,7 +4664,11 @@ const Hud = {
     const ready = BR.roster.filter(e => e.ready).length;
     this.text(g, BR.ready ? 'YOU ARE READY' : this.say('A WHEN READY', 'TAP WHEN READY', 'ENTER WHEN READY'),
       VW / 2, SCREEN_H - 34, 14, BR.ready ? MINT : '#f4e7c0', 'center');
-    this.text(g, `${ready} of ${n} ready` + (taken.size ? '' : ''), VW / 2, SCREEN_H - 18, 8, '#999', 'center');
+    // it starts when everyone is ready, so name who it is waiting on
+    const slow = BR.roster.filter(e => !e.ready && !e.late).map(e => e.name);
+    this.text(g, slow.length ? 'WAITING ON ' + slow.slice(0, 4).join(', ').toUpperCase()
+      + (slow.length > 4 ? ' +' + (slow.length - 4) : '') : `all ${ready} ready`,
+      VW / 2, SCREEN_H - 18, 8, slow.length ? '#f0c040' : MINT, 'center');
     this.text(g, 'ESC leaves', 6, SCREEN_H - 14, 8, '#777');
   },
 
@@ -4837,7 +5067,8 @@ const Main = {
   setState(s) {
     this.state = s;
     this.stateT = 0;
-    document.body.classList.toggle('playing', s === 'play' || s === 'win' || s === 'spectate');
+    document.body.classList.toggle('playing',
+      s === 'play' || s === 'win' || s === 'spectate' || s === 'plane' || s === 'drop');
     document.body.classList.toggle('won', s === 'win');
     if (s === 'paused') BossMusic.stop(false);     // resumes where it was once play starts again
     if (s === 'dead') BossMusic.stop();
@@ -4950,8 +5181,13 @@ const Main = {
       return;
     }
     Sound.play('start');
-    this.setState('play');
+    // out over the block first; 'play' begins when your feet are on it
+    this.setState(BR.plane ? 'plane' : 'play');
     this.lock();
+  },
+
+  onLanded() {
+    if (this.state === 'plane' || this.state === 'drop') this.setState('play');
   },
 
   onBrDeath() {
@@ -5060,6 +5296,11 @@ const Main = {
       if (dir) this.pickSkin(dir);
       if (Input.pressed('Enter') || Input.pressed('KeyR')) this.advance();
       if (Input.pressed('Escape')) this.leaveBr();
+    } else if (this.state === 'plane' || this.state === 'drop') {
+      // the only thing to do aboard is leave
+      if (BR.aboard && (Input.pressed('Space') || Input.pressed('Enter') || Input.pressed('Pad0')
+        || Input.fireHeld())) BR.jump();
+      if (BR.falling && this.state === 'plane') this.setState('drop');
     } else if (this.state === 'spectate' || (this.state === 'dead' && Net.br)) {
       // watching: fire or the arrows move you between the people still standing
       if (Input.pressed('ArrowRight') || Input.pressed('KeyD') || Input.pressed('Pad15')) BR.nextSpec(1);
@@ -5077,7 +5318,15 @@ const Main = {
 
     const g = this.g, p = Game.player;
     if (this.state === 'play' || this.state === 'win') Game.update(dt);
-    else if (this.state === 'dead' || this.state === 'spectate' || this.state === 'results'
+    else if (this.state === 'plane' || this.state === 'drop') {
+      // look around freely, but the plane and the fall own where you are
+      const [mdx, mdy] = Input.takeMouse();
+      p.a += mdx * 0.0011 * Settings.sens + Input.pad.rx * 3.2 * dt * Settings.sens;
+      p.pitch = Math.max(-100, Math.min(100,
+        p.pitch - mdy * 0.5 * Settings.sens - Input.pad.ry * 160 * dt * Settings.sens));
+      BR.updateDrop(dt);
+      if (Game.L) Game.updateWorld(dt);
+    } else if (this.state === 'dead' || this.state === 'spectate' || this.state === 'results'
       || this.state === 'lobby' || (this.state === 'paused' && Net.coop)) {
       if (Game.L) Game.updateWorld(dt);
     }
@@ -5086,7 +5335,8 @@ const Main = {
     // eye height: crouch lowers it, jumping raises it, landing dips it
     let cam = { x: p.x, y: p.y, a: p.a, horizon: CY + p.pitch + p.kick * 0.25,
       eyeZ: EYE - 0.4 * p.crouch + p.z - 0.08 * Math.sin(p.land * Math.PI) };
-    const ring = Net.br && this.state !== 'title' && this.state !== 'lobby' ? BR.ring : null;
+    const ring = Net.br && !['title', 'lobby', 'plane', 'drop'].includes(this.state)
+      ? BR.ring : null;
     if (this.state === 'title') {
       cam = { x: 14 + Math.sin(this.stateT * 0.12) * 7, y: 41.2, a: -Math.PI / 2 + Math.sin(this.stateT * 0.2) * 0.8 };
       Game.time += dt;
@@ -5096,6 +5346,15 @@ const Main = {
       // the yard, turning slowly behind the lobby panel
       const L = Game.L;
       cam = { x: L.w / 2, y: L.h / 2 + 6, a: -Math.PI / 2 + Math.sin(this.stateT * 0.1) * 0.9 };
+    } else if (this.state === 'plane' || this.state === 'drop') {
+      // Up at the plane's height, pitched steeply down and easing level as the ground
+      // arrives. The horizon has to go well above the screen or everything below you
+      // is off the bottom of it -- see flatsFromAbove in engine.js.
+      const alt = BR.plane ? BR.plane.alt : 24;
+      const high = Math.max(0, Math.min(1, (BR.z - 1) / (alt - 1)));
+      cam = { x: p.x, y: p.y, a: p.a,
+        horizon: CY + p.pitch - 150 * high,
+        eyeZ: Math.max(EYE, BR.z) };
     } else if (this.state === 'spectate' || this.state === 'results') {
       // over the shoulder of whoever is still standing
       const t = BR.specTarget();
@@ -5110,13 +5369,14 @@ const Main = {
     Engine.present();
     g.fillStyle = '#000';
     g.fillRect(0, VH, VW, SCREEN_H - VH);
-    if (this.state !== 'title' && this.state !== 'lobby') { Hud.drawBar(g); }
+    if (!['title', 'lobby', 'plane', 'drop'].includes(this.state)) { Hud.drawBar(g); }
     if (this.state === 'play' || this.state === 'win') { Hud.drawBubbles(g); Hud.drawView(g); }
     if (Net.br && (this.state === 'play' || this.state === 'spectate' || this.state === 'dead')) {
       Hud.drawBrView(g);
     }
     if (this.state === 'title') Hud.drawTitle(g, this.stateT);
     if (this.state === 'lobby') Hud.drawBrLobby(g, this.stateT);
+    if (this.state === 'plane' || this.state === 'drop') Hud.drawDrop(g, this.stateT);
     if (this.state === 'spectate') Hud.drawSpectate(g);
     if (this.state === 'results') Hud.drawBrResults(g, this.stateT);
     if (this.state === 'paused') Hud.drawPaused(g);

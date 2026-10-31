@@ -274,7 +274,8 @@ const Main = {
   setState(s) {
     this.state = s;
     this.stateT = 0;
-    document.body.classList.toggle('playing', s === 'play' || s === 'win' || s === 'spectate');
+    document.body.classList.toggle('playing',
+      s === 'play' || s === 'win' || s === 'spectate' || s === 'plane' || s === 'drop');
     document.body.classList.toggle('won', s === 'win');
     if (s === 'paused') BossMusic.stop(false);     // resumes where it was once play starts again
     if (s === 'dead') BossMusic.stop();
@@ -387,8 +388,13 @@ const Main = {
       return;
     }
     Sound.play('start');
-    this.setState('play');
+    // out over the block first; 'play' begins when your feet are on it
+    this.setState(BR.plane ? 'plane' : 'play');
     this.lock();
+  },
+
+  onLanded() {
+    if (this.state === 'plane' || this.state === 'drop') this.setState('play');
   },
 
   onBrDeath() {
@@ -497,6 +503,11 @@ const Main = {
       if (dir) this.pickSkin(dir);
       if (Input.pressed('Enter') || Input.pressed('KeyR')) this.advance();
       if (Input.pressed('Escape')) this.leaveBr();
+    } else if (this.state === 'plane' || this.state === 'drop') {
+      // the only thing to do aboard is leave
+      if (BR.aboard && (Input.pressed('Space') || Input.pressed('Enter') || Input.pressed('Pad0')
+        || Input.fireHeld())) BR.jump();
+      if (BR.falling && this.state === 'plane') this.setState('drop');
     } else if (this.state === 'spectate' || (this.state === 'dead' && Net.br)) {
       // watching: fire or the arrows move you between the people still standing
       if (Input.pressed('ArrowRight') || Input.pressed('KeyD') || Input.pressed('Pad15')) BR.nextSpec(1);
@@ -514,7 +525,15 @@ const Main = {
 
     const g = this.g, p = Game.player;
     if (this.state === 'play' || this.state === 'win') Game.update(dt);
-    else if (this.state === 'dead' || this.state === 'spectate' || this.state === 'results'
+    else if (this.state === 'plane' || this.state === 'drop') {
+      // look around freely, but the plane and the fall own where you are
+      const [mdx, mdy] = Input.takeMouse();
+      p.a += mdx * 0.0011 * Settings.sens + Input.pad.rx * 3.2 * dt * Settings.sens;
+      p.pitch = Math.max(-100, Math.min(100,
+        p.pitch - mdy * 0.5 * Settings.sens - Input.pad.ry * 160 * dt * Settings.sens));
+      BR.updateDrop(dt);
+      if (Game.L) Game.updateWorld(dt);
+    } else if (this.state === 'dead' || this.state === 'spectate' || this.state === 'results'
       || this.state === 'lobby' || (this.state === 'paused' && Net.coop)) {
       if (Game.L) Game.updateWorld(dt);
     }
@@ -523,7 +542,8 @@ const Main = {
     // eye height: crouch lowers it, jumping raises it, landing dips it
     let cam = { x: p.x, y: p.y, a: p.a, horizon: CY + p.pitch + p.kick * 0.25,
       eyeZ: EYE - 0.4 * p.crouch + p.z - 0.08 * Math.sin(p.land * Math.PI) };
-    const ring = Net.br && this.state !== 'title' && this.state !== 'lobby' ? BR.ring : null;
+    const ring = Net.br && !['title', 'lobby', 'plane', 'drop'].includes(this.state)
+      ? BR.ring : null;
     if (this.state === 'title') {
       cam = { x: 14 + Math.sin(this.stateT * 0.12) * 7, y: 41.2, a: -Math.PI / 2 + Math.sin(this.stateT * 0.2) * 0.8 };
       Game.time += dt;
@@ -533,6 +553,15 @@ const Main = {
       // the yard, turning slowly behind the lobby panel
       const L = Game.L;
       cam = { x: L.w / 2, y: L.h / 2 + 6, a: -Math.PI / 2 + Math.sin(this.stateT * 0.1) * 0.9 };
+    } else if (this.state === 'plane' || this.state === 'drop') {
+      // Up at the plane's height, pitched steeply down and easing level as the ground
+      // arrives. The horizon has to go well above the screen or everything below you
+      // is off the bottom of it -- see flatsFromAbove in engine.js.
+      const alt = BR.plane ? BR.plane.alt : 24;
+      const high = Math.max(0, Math.min(1, (BR.z - 1) / (alt - 1)));
+      cam = { x: p.x, y: p.y, a: p.a,
+        horizon: CY + p.pitch - 150 * high,
+        eyeZ: Math.max(EYE, BR.z) };
     } else if (this.state === 'spectate' || this.state === 'results') {
       // over the shoulder of whoever is still standing
       const t = BR.specTarget();
@@ -547,13 +576,14 @@ const Main = {
     Engine.present();
     g.fillStyle = '#000';
     g.fillRect(0, VH, VW, SCREEN_H - VH);
-    if (this.state !== 'title' && this.state !== 'lobby') { Hud.drawBar(g); }
+    if (!['title', 'lobby', 'plane', 'drop'].includes(this.state)) { Hud.drawBar(g); }
     if (this.state === 'play' || this.state === 'win') { Hud.drawBubbles(g); Hud.drawView(g); }
     if (Net.br && (this.state === 'play' || this.state === 'spectate' || this.state === 'dead')) {
       Hud.drawBrView(g);
     }
     if (this.state === 'title') Hud.drawTitle(g, this.stateT);
     if (this.state === 'lobby') Hud.drawBrLobby(g, this.stateT);
+    if (this.state === 'plane' || this.state === 'drop') Hud.drawDrop(g, this.stateT);
     if (this.state === 'spectate') Hud.drawSpectate(g);
     if (this.state === 'results') Hud.drawBrResults(g, this.stateT);
     if (this.state === 'paused') Hud.drawPaused(g);
