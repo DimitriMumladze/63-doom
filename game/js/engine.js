@@ -231,6 +231,14 @@ const Engine = {
       const f = ang / (2 * Math.PI);
       skyU[x] = Math.floor((f - Math.floor(f)) * sky.w) % sky.w;
     }
+    // Above the walls -- the parachute drop, and nothing else: on foot the highest
+    // eyeZ ever reaches is 1.44 at the top of a jump, against a WALL_H of 2. Up there
+    // what you see is roofs and the ground between them, and there is no ceiling at
+    // all, so it is a different cast and gets its own loop.
+    if (eyeZ > WALL_H) {
+      this.flatsFromAbove(cam, level, horizon, eyeZ, flash, sky, camOut, r0x, r0y, r1x, r1y);
+    } else {
+
     // the horizon moves with pitch (looking up/down) and the eye height with
     // jumping/crouching, so floor and ceiling rows are cast separately
     for (let y = 0; y < VH; y++) {
@@ -311,6 +319,8 @@ const Engine = {
       }
     }
 
+    }
+
     // ---------------- the battle royale ring ----------------
     // over the walls and the flats, under the sprites: a coworker standing in front
     // of the gas is in front of it, and one standing behind shows through it
@@ -372,6 +382,93 @@ const Engine = {
       let tv = v | 0;
       if (tv >= th) tv = th - 1;
       this.buf[y * VW + x] = shd(td[tv * tw + tu], fr, fg, fb, ar, ag, ab);
+    }
+  },
+
+  // Flats seen from above the walls, for the drop.
+  //
+  // Two planes are in view at once and both are below you: the roofs at z = WALL_H and
+  // the ground at z = 0. For a screen row p below the horizon they are at
+  //
+  //   roofs  (eyeZ - WALL_H) * PROJ / p      -- nearer, so it wins where it exists
+  //   ground  eyeZ           * PROJ / p
+  //
+  // both constant for the row. So a pixel steps the roof plane, and if the cell there
+  // is solid it draws the roof and stops; only over open ground does it go on to the
+  // second plane. Roof pixels therefore do *less* work than an ordinary ground pixel,
+  // and the whole thing costs one extra coordinate step and one array lookup -- not a
+  // doubled sample, which the flat cast cannot afford.
+  //
+  // Above the horizon there is only sky: you are over the rooftops.
+  flatsFromAbove(cam, level, horizon, eyeZ, flash, sky, camOut, r0x, r0y, r1x, r1y) {
+    const buf = this.buf, wtop = this.wtop, wbot = this.wbot;
+    const lw = level.w, lh = level.h;
+    const px = this.view.px, py = this.view.py;
+    const skyU = this.skyU;
+    const roofH = eyeZ - WALL_H;
+    // From twenty-odd units up the ground detail is already sub-pixel, and this is the
+    // one view where the flat cast is the entire frame. Two pixels at a time, doubled.
+    const step = eyeZ > WALL_H * 3 ? 2 : 1;
+
+    for (let y = 0; y < VH; y++) {
+      const row = y * VW;
+      const d = y + 0.5 - horizon;
+      if (d < 0.5) {
+        // looking up from above the roofs: sky, and nothing else
+        for (let x = 0; x < VW; x++) {
+          if (y >= wtop[x] && y < wbot[x]) continue;
+          let sv = sky.h - 1 - ((horizon - (y + 0.5)) | 0);
+          if (sv < 0) sv = 0;
+          buf[row + x] = sky.data[sv * sky.w + skyU[x]];
+        }
+        continue;
+      }
+      const groundDist = eyeZ * PROJ / d;
+      const roofDist = roofH * PROJ / d;
+      const gsx = groundDist * (r1x - r0x) / VW, gsy = groundDist * (r1y - r0y) / VW;
+      const rsx = roofDist * (r1x - r0x) / VW, rsy = roofDist * (r1y - r0y) / VW;
+      let gx = px + groundDist * r0x + gsx * 0.5, gy = py + groundDist * r0y + gsy * 0.5;
+      let rx = px + roofDist * r0x + rsx * 0.5, ry = py + roofDist * r0y + rsy * 0.5;
+      // one distance per plane per row, so lighting and fog are worked out twice, here
+      const gl = this.distLight(groundDist), rl = this.distLight(roofDist);
+      const gft = this.fogAt(groundDist), rft = this.fogAt(roofDist);
+      const gk = 1 - gft, rk = 1 - rft;
+      const fog = level.fogSky;
+      const gar = fog[0] * gft, gag = fog[1] * gft, gab = fog[2] * gft;
+      const rar = fog[0] * rft, rag = fog[1] * rft, rab = fog[2] * rft;
+
+      for (let x = 0; x < VW; x += step, gx += gsx * step, gy += gsy * step,
+        rx += rsx * step, ry += rsy * step) {
+        if (y >= wtop[x] && y < wbot[x]) continue;          // a wall face is already here
+        let c = 0;
+        const rcx = Math.floor(rx), rcy = Math.floor(ry);
+        const ri = (rcx >= 0 && rcy >= 0 && rcx < lw && rcy < lh) ? rcy * lw + rcx : -1;
+        if (ri >= 0 && level.solid[ri]) {
+          // a roof
+          const tex = level.roofTex[ri];
+          const tu = ((rx - rcx) * 64) & 63, tv = ((ry - rcy) * 64) & 63;
+          const l = level.light[ri] * rl + flash;
+          c = rft > 0
+            ? shadeFog(tex.data[tv * 64 + tu], l * rk, l * rk, l * rk, rar, rag, rab)
+            : shade(tex.data[tv * 64 + tu], l, l, l);
+        } else {
+          // through the gap between the roofs, to the ground
+          const gcx = Math.floor(gx), gcy = Math.floor(gy);
+          const gi = (gcx >= 0 && gcy >= 0 && gcx < lw && gcy < lh) ? gcy * lw + gcx : -1;
+          const tex = gi >= 0 ? level.floorTex[gi] : level.defFloor;
+          const tu = ((gx - gcx) * 64) & 63, tv = ((gy - gcy) * 64) & 63;
+          const l = (gi >= 0 ? level.light[gi] : 0.5) * gl + flash;
+          const tr = gi >= 0 ? level.tintR[gi] : 1, tg = gi >= 0 ? level.tintG[gi] : 1,
+            tb = gi >= 0 ? level.tintB[gi] : 1;
+          c = gft > 0
+            ? shadeFog(tex.data[tv * 64 + tu], l * tr * gk, l * tg * gk, l * tb * gk, gar, gag, gab)
+            : shade(tex.data[tv * 64 + tu], l * tr, l * tg, l * tb);
+        }
+        buf[row + x] = c;
+        if (step === 2 && x + 1 < VW && !(y >= wtop[x + 1] && y < wbot[x + 1])) {
+          buf[row + x + 1] = c;
+        }
+      }
     }
   },
 

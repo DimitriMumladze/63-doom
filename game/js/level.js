@@ -91,7 +91,9 @@ const PICKUPS = {
   rockets: { h: 0.2 }, cells: { h: 0.2 },
 };
 
-const DEFAULTS = { wall: 'concrete', floor: 'floor_oak', ceil: 'ceil_concrete', sky: 'sky_dusk' };
+const DEFAULTS = { wall: 'concrete', floor: 'floor_oak', ceil: 'ceil_concrete', sky: 'sky_dusk',
+  // what a building's roof looks like from above it, which only the parachute drop sees
+  roof: 'ceil_concrete' };
 
 // How light falls off with distance, and what distance fades into.
 //
@@ -131,6 +133,8 @@ function buildLevel(spec) {
     wallTexIn: new Array(N).fill(null), wallH: new Float32Array(N).fill(WALL_H), lintel: new Array(N).fill(null),
     sky: new Uint8Array(N), skyTex: Assets.get('tex/' + def.sky),
     floorTex: new Array(N), ceilTex: new Array(N),
+    // only read from above the walls (the drop); a zone can override it with `roof:`
+    roofTex: new Array(N),
     light: new Float32Array(N), baseLight: new Float32Array(N), flicker: new Float32Array(N),
     tintR: new Float32Array(N).fill(1), tintG: new Float32Array(N).fill(1), tintB: new Float32Array(N).fill(1),
     zone: new Array(N).fill(''),
@@ -150,6 +154,7 @@ function buildLevel(spec) {
   // floor casting samples cells behind walls too, so every cell needs flats
   L.floorTex.fill(L.defFloor);
   L.ceilTex.fill(L.defCeil);
+  L.roofTex.fill(Assets.get('tex/' + def.roof));
   L.baseLight.fill(0.5);
 
   for (let y = 0; y < h; y++) {
@@ -199,6 +204,7 @@ function buildLevel(spec) {
         else if (c === 'redcorner') c = x === 24 && (y === 27 || y === 31) ? 'ceil_chandelier' : 'ceil_ornate';
         else if (c === 'hall_ru') c = (x === 33 || x === 38) && y === 28 ? 'ceil_chandelier' : 'ceil_ornate';
         L.ceilTex[i] = Assets.get('tex/' + c);
+        if (z.roof) L.roofTex[i] = Assets.get('tex/' + z.roof);
         L.baseLight[i] = z.light;
         L.flicker[i] = z.flicker || 0;
         const t = z.tint || [1, 1, 1];

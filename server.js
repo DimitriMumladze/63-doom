@@ -216,9 +216,13 @@ const PLAYER_R = 0.24;
 const CHECK_R = PLAYER_R - 0.01;
 const RUN_SPEED = 5.2;             // see Game.updatePlayer; the fastest anyone can legitimately go
 const DROP_FREEZE = 2.5;           // seconds of "the lift doors open": can't move, can't be shot
-const COUNTDOWN = 20;
+const COUNTDOWN = 5;               // short: being ready is what gates the start now
 const OVER_HOLD = 20;              // the results screen, before everyone goes back to the lobby
-const LOBBY_WAIT = 90;             // start anyway after this long with enough people
+// The match starts when everyone is ready. This is only a backstop, so that one
+// person who wandered off with the tab open cannot hold the room: once enough people
+// have been ready this long while others have not, it goes without them. They stay
+// connected, watch, and are in the next one -- the same path a late arrival takes.
+const READY_HOLD = 120;
 
 // how far each gun can hurt anyone, and where its damage starts dropping off
 const RANGE = { pistol: [40, 40], shotgun: [16, 6], dbshotgun: [14, 5], chaingun: [40, 40],
@@ -246,7 +250,7 @@ const START_KIT = { weapon: 'shotgun', has: ['pistol', 'shotgun'],
 
 const BR = {
   MAX: 15, MIN: 2,
-  state: 'lobby', t: 0, tick: 0, match: 0, seed: 1, started: 0,
+  state: 'lobby', t: 0, tick: 0, match: 0, seed: 1, started: 0, readyT: 0,
   sent: 0, tickMs: 0, tickPeak: 0, reportT: 0, phaseMs: [], cpuAt: null,
   fixes: { fast: 0, wall: 0 },
   players: new Map(),              // id -> player record (its .conn is the socket)
@@ -454,19 +458,28 @@ const BR = {
     this.t = 0;
     this.feed = [];
     this.dead = [];
-    this.started = this.players.size;
     this.startRing(rnd);
     this.sent = 0; this.tickMs = 0; this.tickPeak = 0; this.reportT = 0;
 
-    // spread everyone out: shuffle the spawns, then keep picking the one furthest
-    // from everybody already placed
+    // Who is actually in it. Anyone not ready when it went watches this one and is in
+    // the next, down the same path a late arrival takes. `started` must count only the
+    // players, or every placing is reported out of the wrong total.
+    const playing = [];
+    for (const p of this.players.values()) {
+      p.late = !p.ready;
+      if (p.late) send(p.conn, this.matchMsg(p)); else playing.push(p);
+    }
+    this.started = playing.length;
+
+    // spread them out: shuffle the spawns, then keep picking the one furthest from
+    // everybody already placed
     const spots = Rules.C.spawns.slice();
     for (let i = spots.length - 1; i > 0; i--) {
       const j = Math.floor(rnd() * (i + 1));
       [spots[i], spots[j]] = [spots[j], spots[i]];
     }
     const taken = [];
-    for (const p of this.players.values()) {
+    for (const p of playing) {
       let best = spots[0], bestD = -1;
       for (const s of spots) {
         if (taken.includes(s)) continue;
@@ -475,7 +488,6 @@ const BR = {
         if (near > bestD) { bestD = near; best = s; }
       }
       taken.push(best);
-      p.late = false;
       p.x = best.x; p.y = best.y; p.a = best.a;
       p.z = 0; p.crouch = 0; p.moving = false;
       p.hp = 100; p.armor = 0; p.alive = true; p.kills = 0; p.place = 0;
@@ -488,7 +500,9 @@ const BR = {
       p.spec = 0;
       send(p.conn, this.matchMsg(p));
     }
-    log(`match ${this.match} started: ${this.players.size} players, seed ${this.seed}`);
+    log(`match ${this.match} started: ${playing.length} players` +
+      (this.players.size > playing.length ? ` (${this.players.size - playing.length} watching)` : '') +
+      `, seed ${this.seed}`);
     updateLobby();
   },
 
@@ -647,14 +661,27 @@ const BR = {
     const n = this.waiting().length;
 
     if (this.state === 'lobby') {
-      const ready = this.waiting().filter(p => p.ready).length;
-      if (n >= this.MIN && (ready === n || this.t > LOBBY_WAIT)) {
+      const waiting = this.waiting();
+      const ready = waiting.filter(p => p.ready).length;
+      // how long enough of them have been ready and waiting on the rest
+      if (ready >= this.MIN) this.readyT += dt; else this.readyT = 0;
+      const all = n >= this.MIN && ready === n;
+      const held = this.readyT > READY_HOLD;
+      if (all || held) {
         this.state = 'countdown';
         this.t = 0;
-        log(`countdown: ${n} players, ${ready} ready`);
+        this.readyT = 0;
+        if (held && !all) {
+          const idle = waiting.filter(p => !p.ready).map(p => p.name).join(', ');
+          log(`countdown: ${ready} ready and waited ${READY_HOLD}s; starting without ${idle}`);
+          this.say('Starting. ' + idle + ' can watch.');
+        } else log(`countdown: all ${n} ready`);
       }
     } else if (this.state === 'countdown') {
-      if (n < this.MIN) { this.state = 'lobby'; this.t = 0; this.say('Not enough people. Waiting.'); }
+      if (n < this.MIN) {
+        this.state = 'lobby'; this.t = 0; this.readyT = 0;
+        this.say('Not enough people. Waiting.');
+      }
       else if (this.t >= COUNTDOWN) this.startMatch();
     } else if (this.state === 'live') {
       for (const p of this.players.values()) if (p.frozen > 0) p.frozen -= dt;
@@ -717,7 +744,8 @@ const BR = {
       id: p.id, slot: p.slot, name: p.name, skin: p.skin, ready: p.ready, late: p.late }));
     // ct, not t: t is the message type, and a second t silently ate it
     const m = { t: 'blobby', state: this.state, ct: r2(this.t), roster,
-      min: this.MIN, max: this.MAX, countdown: COUNTDOWN, wait: LOBBY_WAIT };
+      min: this.MIN, max: this.MAX, countdown: COUNTDOWN, hold: READY_HOLD,
+      readyT: r2(this.readyT) };
     for (const p of this.players.values()) send(p.conn, m);
   },
 
