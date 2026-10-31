@@ -25,75 +25,36 @@ const ENEMY_TYPES = {
     door: 'u', song: 'music/agamemnov.mp3', greet: 'THE AGAMEMNOV awaits!' },
 };
 
-const PROJ_TYPES = {
-  fireball: { speed: 7, frames: ['fx/fireball_0', 'fx/fireball_1'], h: 0.36, hit: 'explode' },
-  plasma: { speed: 11, frames: ['fx/plasma_0', 'fx/plasma_1'], h: 0.3, hit: 'zap' },
-  rocket: { speed: 8.5, frames: ['fx/rocket_0', 'fx/rocket_1'], h: 0.34, hit: 'explode' },
-  prock: { speed: 14, frames: ['fx/rocket_0', 'fx/rocket_1'], h: 0.3, hit: 'explode' },
-  pplasma: { speed: 20, frames: ['fx/plasma_0', 'fx/plasma_1'], h: 0.24, hit: 'zap' },
-  hammer: { speed: 9, frames: ['fx/hammer_0', 'fx/hammer_1', 'fx/hammer_2', 'fx/hammer_3'], h: 0.4, hit: 'puff',
-    hitSound: 'clang' },
-  sickle: { speed: 9, frames: ['fx/sickle_0', 'fx/sickle_1', 'fx/sickle_2', 'fx/sickle_3'], h: 0.4, hit: 'puff',
-    hitSound: 'clang' },
-  spear: { speed: 13, frames: ['fx/spear_0', 'fx/spear_1', 'fx/spear_2', 'fx/spear_3'], h: 0.36, hit: 'puff',
-    hitSound: 'clang' },
-};
-
-// seq: [from, to, frame] by time since the shot; auto weapons alternate frames 1/2
-const WEAPONS = {
-  pistol: { slot: 1, label: 'PISTOL', ammo: 'bullets', cool: 0.38, dmg: [8, 15], pellets: 1, spread: 0.012,
-    frames: 2, seq: [[0, 0.12, 1]], sound: 'pistol', kick: 6 },
-  shotgun: { slot: 2, label: 'SHOTGUN', ammo: 'shells', cool: 0.95, dmg: [6, 14], pellets: 7, spread: 0.1,
-    frames: 3, seq: [[0, 0.12, 1], [0.3, 0.75, 2]], sound: 'shotgun', kick: 12 },
-  dbshotgun: { slot: 3, label: 'SUPER SG', ammo: 'shells', use: 2, cool: 1.45, dmg: [6, 14], pellets: 18, spread: 0.2,
-    frames: 3, seq: [[0, 0.15, 1], [0.4, 1.25, 2]], sound: 'dbshotgun', kick: 18 },
-  chaingun: { slot: 4, label: 'CHAINGUN', ammo: 'bullets', cool: 0.1, dmg: [7, 13], pellets: 1, spread: 0.045,
-    auto: true, frames: 3, sound: 'chaingun', kick: 3 },
-  rifle: { slot: 5, label: 'RIFLE', ammo: 'bullets', cool: 0.09, dmg: [9, 15], pellets: 1, spread: 0.02,
-    auto: true, frames: 3, sound: 'rifle', kick: 3 },
-  rocketl: { slot: 6, label: 'ROCKETS', ammo: 'rockets', cool: 0.9, dmg: [60, 100], proj: 'prock', splash: 1.6,
-    frames: 3, seq: [[0, 0.15, 1], [0.3, 0.75, 2]], sound: 'rocket', kick: 14 },
-  plasmagun: { slot: 7, label: 'PLASMA', ammo: 'cells', cool: 0.08, dmg: [10, 18], proj: 'pplasma',
-    auto: true, frames: 3, sound: 'plasma', kick: 2 },
-};
-const AMMO_MAX = { bullets: 200, shells: 50, rockets: 30, cells: 200 };
-
 const rand = (a, b) => a + Math.random() * (b - a);
 const randi = (a, b) => Math.floor(rand(a, b + 1));
 
 const Game = {
+  mode: null,          // Modes.campaign or Modes.br (see mode.js): the rules, not the simulation
   L: null, player: null, enemies: [], projs: [], fx: [], msgs: [],
   time: 0, kills: 0, totalEnemies: 0, flowT: 0, flow: null, noise: 0, washR: 0, washG: 0,
   target: null, targetT: 0,
 
-  start() {
-    const L = this.L = buildLevel();
-    this.enemies = L.spawns.map(s => this.makeEnemy(s.type, s.x, s.y));
+  start(modeId) {
+    this.mode = Modes[modeId] || this.mode || Modes.campaign;
+    const L = this.L = buildLevel(this.mode.spec());
+    this.enemies = this.mode.enemies ? L.spawns.map(s => this.makeEnemy(s.type, s.x, s.y)) : [];
     this.totalEnemies = this.enemies.length;
     this.kills = 0;
     this.projs = []; this.fx = []; this.msgs = []; this.vapor = [];
     this.time = 0;
     this.player = this.newPlayer();
     this.flow = new Int16Array(L.w * L.h);
-    this.computeFlow();
+    if (this.mode.enemies) this.computeFlow();
     this.songBoss = null;
     BossMusic.stop();
-    this.say('Burdzgla St. 65. The lights are still on at 63 BITS...');
+    this.mode.onStart();
   },
 
-  newPlayer() {
-    const L = this.L;
-    return {
-      x: L.start.x, y: L.start.y, a: L.start.a, r: 0.24, isPlayer: true,
-      hp: 100, armor: 0, ammo: { bullets: 50, shells: 0, rockets: 0, cells: 0 },
-      has: { pistol: true, shotgun: false, dbshotgun: false, chaingun: false, rifle: false, rocketl: false, plasmagun: false },
-      weapon: 'pistol', fireT: 0, shotT: 9, bob: 0, moving: false, dead: false, shots: 0,
-      z: 0, vz: 0, crouch: 0, pitch: 0, land: 0, kick: 0, flip: false,
-    };
-  },
+  newPlayer() { return this.mode.newPlayer(this.L); },
 
   // co-op: back at the front door with a pistol, the office stays as it is
   respawn() {
+    if (!this.mode.respawn) return;
     this.player = this.newPlayer();
     this.lastHitBy = null;
     this.washR = 0;
@@ -168,19 +129,25 @@ const Game = {
 
   // circle vs blocked cells; extra = list of {x,y,r} circles (props)
   free(x, y, r, self) {
+    const L = this.L;
     const x0 = Math.floor(x - r), x1 = Math.floor(x + r), y0 = Math.floor(y - r), y1 = Math.floor(y + r);
     for (let cy = y0; cy <= y1; cy++) {
       for (let cx = x0; cx <= x1; cx++) {
-        if (!this.blocked(cx, cy)) continue;
-        const nx = Math.max(cx, Math.min(x, cx + 1)), ny = Math.max(cy, Math.min(y, cy + 1));
-        if ((nx - x) ** 2 + (ny - y) ** 2 < r * r) return false;
+        if (this.blocked(cx, cy)) {
+          const nx = Math.max(cx, Math.min(x, cx + 1)), ny = Math.max(cy, Math.min(y, cy + 1));
+          if ((nx - x) ** 2 + (ny - y) ** 2 < r * r) return false;
+        }
+        // props you bump into, bucketed per cell by indexDecor() so a big map does
+        // not cost a walk of the whole prop list on every one of these calls
+        if (cx < 0 || cy < 0 || cx >= L.w || cy >= L.h) continue;
+        const here = L.decorAt[cy * L.w + cx];
+        if (!here) continue;
+        for (const d of here) {
+          if ((d.x - x) ** 2 + (d.y - y) ** 2 < (d.r + r) ** 2) return false;
+        }
       }
     }
-    for (const d of this.L.decor) {
-      if (!d.r) continue;
-      if ((d.x - x) ** 2 + (d.y - y) ** 2 < (d.r + r) ** 2) return false;
-    }
-    for (const n of this.L.npcs) {
+    for (const n of L.npcs) {
       if (n === self) continue;
       if ((n.x - x) ** 2 + (n.y - y) ** 2 < (n.r + r) ** 2) return false;
     }
@@ -385,7 +352,9 @@ const Game = {
         if (alt) this.switchWeapon(alt);
       }
     }
-    // pickups
+    // pickups. In a battle royale what is on the ground came from the server and is
+    // handled by BR.tryTake; the level has none of its own.
+    if (this.mode.id === 'br') return;
     for (const it of this.L.pickups) {
       if (it.taken || it.mine || (it.x - p.x) ** 2 + (it.y - p.y) ** 2 > 0.36) continue;
       if (!this.pickup(it.type)) continue;
@@ -411,6 +380,8 @@ const Game = {
 
   fire(w) {
     const p = this.player;
+    // one message per trigger pull, listing everyone the pellets found: see BR.shot
+    this.shotHits = this.mode.id === 'br' ? new Map() : null;
     p.ammo[w.ammo] -= w.use || 1;
     p.fireT = w.cool;
     p.shotT = 0;
@@ -435,6 +406,10 @@ const Game = {
       const a = p.a + rand(-w.spread, w.spread);
       this.hitscan(p.x, p.y, a, randi(w.dmg[0], w.dmg[1]), null);
     }
+    if (this.shotHits) {
+      Net.send({ t: 'shot', w: p.weapon, v: [...this.shotHits] });
+      this.shotHits = null;
+    }
   },
 
   // ray from (x, y) at angle a; hits the closest enemy (or the player) before a wall.
@@ -455,7 +430,10 @@ const Game = {
     const hx = x + dx * (bestT - 0.05), hy = y + dy * (bestT - 0.05);
     if (best && best.isPlayer) {
       if (!shooter) this.addFx(hx, hy, 'blood', 0.75, 0.16);
-      this.hurtAny(best, dmg, shooter || this.player);
+      // battle royale: count the pellet and let the server work out the damage
+      if (this.shotHits && best.id) {
+        this.shotHits.set(best.id, (this.shotHits.get(best.id) || 0) + 1);
+      } else this.hurtAny(best, dmg, shooter || this.player);
     } else if (best) {
       this.addFx(hx, hy, 'blood', 0.75, 0.16);
       if (Net.guest) {
@@ -491,6 +469,9 @@ const Game = {
   hurtPlayer(dmg, src) {
     const p = this.player;
     if (p.dead) return;
+    // in a battle royale your health comes down from the server (BR.onYou), so
+    // nothing here may touch it -- otherwise it counts every hit twice
+    if (this.mode.id === 'br') return;
     if (p.armor > 0) {
       const absorbed = Math.min(p.armor, Math.floor(dmg / 3));
       p.armor -= absorbed;
@@ -504,7 +485,7 @@ const Game = {
       p.hp = 0;
       p.dead = true;
       Sound.play('playerdie');
-      Main.onDeath();
+      this.mode.onDeath();
     }
   },
 
@@ -851,33 +832,18 @@ const Game = {
       // the host runs the coworkers, doors and projectiles; between snapshots the projectiles fly on
       for (const pr of this.projs) { pr.x += pr.vx * dt; pr.y += pr.vy * dt; pr.t += dt; }
     } else {
-      this.flowT -= dt;
-      if (this.flowT <= 0) { this.computeFlow(); this.flowT = 0.3; }
-      this.updateDoors(dt);
-      this.updateEnemies(dt);
+      if (this.mode.enemies) {
+        this.flowT -= dt;
+        if (this.flowT <= 0) { this.computeFlow(); this.flowT = 0.3; }
+        this.updateEnemies(dt);
+      }
+      if (this.mode.doors) this.updateDoors(dt);
       this.updateProjs(dt);
     }
     this.updateFx(dt);
-    this.updateNpcs(dt);
+    if (this.mode.npcs) this.updateNpcs(dt);
     this.updateLights();
-    const fighting = this.enemies.filter(e => (e.state === 'chase' || e.state === 'attack')
-      && Math.hypot(e.x - this.player.x, e.y - this.player.y) < 14).length;
-    Music.setIntensity(Math.min(1, fighting / 3));
-    const p = this.player;
-    // a boss's song starts when his door opens (or he wakes up some other way) and plays until he dies
-    const sb = this.songBoss && this.songBoss.hp > 0 ? this.songBoss
-      : this.enemies.find(e => e.t.song && e.hp > 0 && e.state !== 'idle');
-    if (sb && !p.dead) BossMusic.play(sb.t.song);
-    // what is the crosshair on? (HUD shows that coworker's face)
-    const dx = Math.cos(p.a), dy = Math.sin(p.a);
-    const wall = Engine.castDist(this.L, p.x, p.y, dx, dy, 30);
-    let best = null, bestT = wall;
-    for (const e of this.enemies) {
-      if (e.hp <= 0) continue;
-      const ex = e.x - p.x, ey = e.y - p.y, t = ex * dx + ey * dy;
-      if (t > 0 && t < bestT && Math.abs(ex * dy - ey * dx) < e.hitR) { best = e; bestT = t; }
-    }
-    if (best) { this.target = best; this.targetT = 1.5; }
+    this.mode.update(dt);
   },
 
   // sprite list for the renderer (viewOf is below Game)
@@ -885,7 +851,11 @@ const Game = {
     const out = [];
     const t = this.time;
     const p = this.player;
+    // on a big map most props are far out of sight; L.cull (unset in the campaign,
+    // where everything is close) keeps them out of the list entirely
+    const cull2 = this.L.cull ? this.L.cull * this.L.cull : Infinity;
     for (const d of this.L.decor) {
+      if ((d.x - p.x) ** 2 + (d.y - p.y) ** 2 > cull2) continue;
       let tex = d.anim ? Assets.get('prop/' + d.anim[Math.floor(t * 8) % d.anim.length]) : d.tex;
       if (d.anim && Math.sin(t * 3 + d.x) < -0.3) continue;   // sparks come and go
       let flip = false;
@@ -918,21 +888,12 @@ const Game = {
         tex: Assets.get('fx/' + v.kind + '_' + f), h, lift: v.z - h / 2 });
     }
     for (const it of this.L.pickups) {
-      if (!it.taken && !it.mine) out.push({ x: it.x, y: it.y, tex: it.tex, h: it.h, lift: 0 });
+      if (it.taken || it.mine) continue;
+      if ((it.x - p.x) ** 2 + (it.y - p.y) ** 2 > cull2) continue;
+      out.push({ x: it.x, y: it.y, tex: it.tex, h: it.h, lift: 0 });
     }
-    // the other players in co-op: a coworker sprite in their own colour
-    for (const r of Net.active()) {
-      const frame = r.dead ? 'death4' : r.shotT < 0.15 ? 'attack2'
-        : r.moving ? ['walk1', 'walk2', 'walk3', 'walk2'][Math.floor(r.animT / 0.17) % 4] : 'idle';
-      const [tintR, tintG, tintB] = playerTint(r.slot);
-      out.push({ x: r.x, y: r.y, tex: Assets.get(PLAYER_SKIN + '/' + frame), h: 1.25 - (r.dead ? 0 : 0.3 * r.crouch),
-        lift: r.z, tintR, tintG, tintB });
-    }
-    for (const e of this.enemies) {
-      const tex = Assets.get(e.type + '/' + e.frame);
-      // death frames are 2x wider but the same pixel scale
-      out.push({ x: e.x, y: e.y, tex, h: e.h, lift: 0 });
-    }
+    // the coworkers, or the other fourteen people trying to kill you
+    this.mode.sprites(out);
     for (const pr of this.projs) {
       const pt = PROJ_TYPES[pr.kind];
       out.push({ x: pr.x, y: pr.y, tex: Assets.get(pt.frames[Math.floor(pr.t * 10) % pt.frames.length]), h: pt.h,

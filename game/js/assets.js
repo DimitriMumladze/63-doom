@@ -2,9 +2,21 @@
 // In the bundled single-file build, window.EMBED maps each path to a data URI.
 'use strict';
 
-const ASSET_BASE = '../assets/';
+// Where an asset comes from. The bundled single file carries most of them as data
+// URIs in window.EMBED; what is left out of the embed (the boss music, which is the
+// bulk of the bytes) sits in assets/ next to the page. Unbundled, game/index.html
+// loads everything from ../assets/.
+const BUNDLED = typeof window !== 'undefined' && !!window.EMBED;
+const ASSET_BASE = BUNDLED ? 'assets/' : '../assets/';
+const assetUrl = path => (BUNDLED && window.EMBED[path]) || (ASSET_BASE + path);
 
+// the coworkers who come after you in the campaign
 const CREW = ['brute', 'tank', 'irakli', 'beard', 'rider', 'sandro', 'agamemnov'];
+// who you can be in the battle royale. The same list lives in server.js (it hands out
+// the spare ones, so two people are not the same colleague) -- keep them in step.
+// hood and specs were drawn with the rest of the crew but never used in the campaign.
+const SKINS = ['brute', 'tank', 'irakli', 'beard', 'rider', 'hood', 'specs', 'sandro', 'agamemnov'];
+const CHARS = [...new Set([...CREW, ...SKINS])];
 const STAND_FRAMES = ['idle', 'walk1', 'walk2', 'walk3', 'attack1', 'attack2', 'pain',
   'death1', 'death2', 'death3', 'death4'];
 const SEAT_FRAMES = ['idle', 'walk1', 'walk2', 'walk3', 'walk4', 'attack1', 'attack2', 'pain',
@@ -38,7 +50,7 @@ const MANIFEST = (() => {
     'soviet_flag', 'bust', 'samovar', 'tv_rubin', 'desk_soviet', 'matryoshka', 'coat_stand', 'star_lamp',
     'russian_flag', 'throne',
   ]) list.push(['prop/' + p, 'props/' + p + '.png']);
-  for (const c of CREW) {
+  for (const c of CHARS) {
     const frames = c === 'rider' ? SEAT_FRAMES : STAND_FRAMES;
     for (const f of frames) list.push([c + '/' + f, 'chars/' + c + '/' + f + '.png']);
     list.push([c + '/face', 'chars/' + c + '/face.png']);
@@ -78,15 +90,14 @@ const Assets = {
         resolve();
       };
       im.onerror = () => reject(new Error('missing asset ' + path));
-      im.src = (window.EMBED && window.EMBED[path]) || (ASSET_BASE + path);
+      im.src = assetUrl(path);
     }))]);
   },
 
   // GeoPixel (Georgian pixel font) for the speech boxes; without it they fall back to the HUD font
   loadFont() {
     if (!window.FontFace || !document.fonts) return Promise.resolve();
-    const path = 'fonts/geopixel.ttf';
-    const src = (window.EMBED && window.EMBED[path]) || (ASSET_BASE + path);
+    const src = assetUrl('fonts/geopixel.ttf');
     return new FontFace('GeoPixel', 'url(' + src + ')').load()
       .then(f => { document.fonts.add(f); })
       .catch(err => console.warn('GeoPixel font not loaded', err));

@@ -6,9 +6,12 @@ const VW = 480;           // 3D view width (internal pixels)
 const VH = 230;           // 3D view height; the HUD bar sits below
 const SCREEN_H = 270;
 const CY = VH / 2;
-const WALL_H = 2.0;
 const EYE = 1.0;          // eye height; equals WALL_H - EYE so floor/ceiling rows mirror
+                          // (WALL_H lives in collide.js, which the server shares)
 const FOV = 66 * Math.PI / 180;
+// the battle royale ring: how tall the curtain of static stands, and its colour
+const RING_H = 6.0;
+const RING_R = 170, RING_G = 225, RING_B = 255;
 const PLANE = Math.tan(FOV / 2);
 const PROJ = (VW / 2) / PLANE;
 
@@ -22,6 +25,7 @@ const Engine = {
   ltop: new Int16Array(VW),      // per-column lintel span (facade above a front door)
   lbot: new Int16Array(VW),
   skyU: new Int32Array(VW),      // per-column sky panorama column
+  ringT: new Float32Array(VW),   // per-column distance to the battle royale ring, 1e9 = not in view
   flash: 0,               // extra light from muzzle flashes / explosions
 
   init(canvas) {
@@ -33,10 +37,30 @@ const Engine = {
 
   // ------------------------------------------------------------------
   // lighting helpers
+  //
+  // How much dimmer a thing is for being far away. The office is small enough that
+  // one setting fitted it; a battle royale map is not, so the numbers come off the
+  // level (see L.lightRange / L.lightFloor in level.js). The campaign's are the
+  // numbers this always used.
+  //
+  // On their own they are not enough on a big map: past the floor every distance
+  // looks the same, so a wall fifteen cells away and one ninety cells away are the
+  // same shade of dark. That is what the fog below is for.
   // ------------------------------------------------------------------
   distLight(d) {
-    const v = 1.25 - d / 15;
-    return v < 0.22 ? 0.22 : (v > 1 ? 1 : v);
+    const v = 1.25 - d / this.lightRange;
+    return v < this.lightFloor ? this.lightFloor : (v > 1 ? 1 : v);
+  },
+
+  // How much of what you see at distance d is fog rather than the thing itself.
+  // Fog is never evaluated per pixel: a wall column has one distance, a floor row
+  // has one distance, and a sprite has one distance, so it collapses into the light
+  // factors those loops already work out, plus one additive term. Three adds per
+  // pixel instead of a blend.
+  fogAt(d) {
+    if (!this.fogSpan) return 0;
+    const t = (d - this.fogNear) / this.fogSpan;
+    return t < 0 ? 0 : (t > 1 ? this.fogMax : t * this.fogMax);
   },
 
   // ------------------------------------------------------------------
@@ -89,6 +113,12 @@ const Engine = {
   // ------------------------------------------------------------------
   render(cam, level, sprites) {
     const buf = this.buf;
+    // the level's own lighting, hoisted for the frame
+    this.lightRange = level.lightRange || 15;
+    this.lightFloor = level.lightFloor === undefined ? 0.22 : level.lightFloor;
+    this.fogNear = level.fogNear || 0;
+    this.fogSpan = level.fogFar ? Math.max(0.001, level.fogFar - this.fogNear) : 0;
+    this.fogMax = level.fogMax === undefined ? 1 : level.fogMax;
     const dirX = Math.cos(cam.a), dirY = Math.sin(cam.a);
     const plX = -dirY * PLANE, plY = dirX * PLANE;
     const px = cam.x, py = cam.y;
@@ -165,12 +195,27 @@ const Engine = {
         lc = level.light[li]; tr = level.tintR[li]; tg = level.tintG[li]; tb = level.tintB[li];
       }
       const l = lc * this.distLight(dist) * (side ? 0.84 : 1) + flash;
+      // one distance for the whole column, so the fog is worked out once here --
+      // and when there is none, the column takes the loop that knows nothing about it
+      const ft = this.fogAt(dist), k = 1 - ft;
+      const fr = l * tr * k, fg = l * tg * k, fb = l * tb * k;
       const vStep = th / (bot - top);
       let v = (y0 + 0.5 - top) * vStep;
-      for (let y = y0; y < y1; y++, v += vStep) {
-        let tv = v | 0;
-        if (tv >= th) tv = th - 1;
-        buf[y * VW + x] = shade(td[tv * tw + tu], l * tr, l * tg, l * tb);
+      if (ft > 0) {
+        const fog = (pmx >= 0 && pmy >= 0 && pmx < lw && pmy < lh && level.sky[pmy * lw + pmx])
+          ? level.fogSky : level.fogDark;
+        const ar = fog[0] * ft, ag = fog[1] * ft, ab = fog[2] * ft;
+        for (let y = y0; y < y1; y++, v += vStep) {
+          let tv = v | 0;
+          if (tv >= th) tv = th - 1;
+          buf[y * VW + x] = shadeFog(td[tv * tw + tu], fr, fg, fb, ar, ag, ab);
+        }
+      } else {
+        for (let y = y0; y < y1; y++, v += vStep) {
+          let tv = v | 0;
+          if (tv >= th) tv = th - 1;
+          buf[y * VW + x] = shade(td[tv * tw + tu], fr, fg, fb);
+        }
       }
     }
 
@@ -186,6 +231,14 @@ const Engine = {
       const f = ang / (2 * Math.PI);
       skyU[x] = Math.floor((f - Math.floor(f)) * sky.w) % sky.w;
     }
+    // Above the walls -- the parachute drop, and nothing else: on foot the highest
+    // eyeZ ever reaches is 1.44 at the top of a jump, against a WALL_H of 2. Up there
+    // what you see is roofs and the ground between them, and there is no ceiling at
+    // all, so it is a different cast and gets its own loop.
+    if (eyeZ > WALL_H) {
+      this.flatsFromAbove(cam, level, horizon, eyeZ, flash, sky, camOut, r0x, r0y, r1x, r1y);
+    } else {
+
     // the horizon moves with pitch (looking up/down) and the eye height with
     // jumping/crouching, so floor and ceiling rows are cast separately
     for (let y = 0; y < VH; y++) {
@@ -198,33 +251,83 @@ const Engine = {
       let fx = px + rowDist * r0x + stepX * 0.5;
       let fy = py + rowDist * r0y + stepY * 0.5;
       const dl = this.distLight(rowDist);
+      // One distance for the whole row, so the fog for it is worked out once. The row
+      // is then drawn by one of two loops: the second is the first with the fog added,
+      // and the first is exactly what this did before fog existed. They are written out
+      // twice rather than sharing a body with a flag in it, because this is the loop
+      // that paints most of the screen and a test per pixel showed up in the frame time.
+      const rft = this.fogAt(rowDist);
       const row = y * VW;
-      for (let x = 0; x < VW; x++, fx += stepX, fy += stepY) {
-        if (y >= wtop[x] && y < wbot[x]) continue;      // a wall is already drawn here
-        if (y >= ltop[x] && y < lbot[x]) continue;      // so is a lintel
-        const cx = Math.floor(fx), cy = Math.floor(fy);
-        let ci = -1;
-        if (cx >= 0 && cy >= 0 && cx < lw && cy < lh) ci = cy * lw + cx;
-        if (!floor && (ci >= 0 ? level.sky[ci] === 1 : camOut)) {
-          let sv = sky.h - 1 - (p | 0);
-          if (sv < 0) sv = 0;
-          buf[row + x] = sky.data[sv * sky.w + skyU[x]];
-          continue;
+      if (rft <= 0) {
+        for (let x = 0; x < VW; x++, fx += stepX, fy += stepY) {
+          if (y >= wtop[x] && y < wbot[x]) continue;      // a wall is already drawn here
+          if (y >= ltop[x] && y < lbot[x]) continue;      // so is a lintel
+          const cx = Math.floor(fx), cy = Math.floor(fy);
+          let ci = -1;
+          if (cx >= 0 && cy >= 0 && cx < lw && cy < lh) ci = cy * lw + cx;
+          if (!floor && (ci >= 0 ? level.sky[ci] === 1 : camOut)) {
+            let sv = sky.h - 1 - (p | 0);
+            if (sv < 0) sv = 0;
+            buf[row + x] = sky.data[sv * sky.w + skyU[x]];
+            continue;
+          }
+          const tu = ((fx - cx) * 64) & 63;
+          const tv = ((fy - cy) * 64) & 63;
+          let tex, l, tr, tg, tb;
+          if (ci >= 0) {
+            tex = floor ? level.floorTex[ci] : level.ceilTex[ci];
+            l = level.light[ci] * dl + flash;
+            tr = level.tintR[ci]; tg = level.tintG[ci]; tb = level.tintB[ci];
+          } else {
+            tex = floor ? level.defFloor : level.defCeil; l = dl * 0.5; tr = tg = tb = 1;
+          }
+          if (!floor) l = tex.bright ? (l < 0.9 ? 0.9 : l) : l * 0.85;
+          buf[row + x] = shade(tex.data[tv * 64 + tu], l * tr, l * tg, l * tb);
         }
-        const tu = ((fx - cx) * 64) & 63;
-        const tv = ((fy - cy) * 64) & 63;
-        let tex, l, tr, tg, tb;
-        if (ci >= 0) {
-          tex = floor ? level.floorTex[ci] : level.ceilTex[ci];
-          l = level.light[ci] * dl + flash;
-          tr = level.tintR[ci]; tg = level.tintG[ci]; tb = level.tintB[ci];
-        } else {
-          tex = floor ? level.defFloor : level.defCeil; l = dl * 0.5; tr = tg = tb = 1;
+      } else {
+        const rk = 1 - rft;
+        const skyR = level.fogSky[0] * rft, skyG = level.fogSky[1] * rft, skyB = level.fogSky[2] * rft;
+        const darkR = level.fogDark[0] * rft, darkG = level.fogDark[1] * rft, darkB = level.fogDark[2] * rft;
+        for (let x = 0; x < VW; x++, fx += stepX, fy += stepY) {
+          if (y >= wtop[x] && y < wbot[x]) continue;
+          if (y >= ltop[x] && y < lbot[x]) continue;
+          const cx = Math.floor(fx), cy = Math.floor(fy);
+          let ci = -1;
+          if (cx >= 0 && cy >= 0 && cx < lw && cy < lh) ci = cy * lw + cx;
+          const out = ci >= 0 ? level.sky[ci] === 1 : camOut;
+          if (!floor && out) {
+            // the sky is the fog, so it needs none of its own
+            let sv = sky.h - 1 - (p | 0);
+            if (sv < 0) sv = 0;
+            buf[row + x] = sky.data[sv * sky.w + skyU[x]];
+            continue;
+          }
+          const tu = ((fx - cx) * 64) & 63;
+          const tv = ((fy - cy) * 64) & 63;
+          let tex, l, tr, tg, tb;
+          if (ci >= 0) {
+            tex = floor ? level.floorTex[ci] : level.ceilTex[ci];
+            l = level.light[ci] * dl + flash;
+            tr = level.tintR[ci]; tg = level.tintG[ci]; tb = level.tintB[ci];
+          } else {
+            tex = floor ? level.defFloor : level.defCeil; l = dl * 0.5; tr = tg = tb = 1;
+          }
+          if (!floor) l = tex.bright ? (l < 0.9 ? 0.9 : l) : l * 0.85;
+          buf[row + x] = shadeFog(tex.data[tv * 64 + tu], l * tr * rk, l * tg * rk, l * tb * rk,
+            out ? skyR : darkR, out ? skyG : darkG, out ? skyB : darkB);
         }
-        if (!floor) l = tex.bright ? (l < 0.9 ? 0.9 : l) : l * 0.85;
-        buf[row + x] = shade(tex.data[tv * 64 + tu], l * tr, l * tg, l * tb);
       }
     }
+
+    }
+
+    // ---------------- the battle royale ring ----------------
+    // over the walls and the flats, under the sprites: a coworker standing in front
+    // of the gas is in front of it, and one standing behind shows through it
+    if (cam.ring) {
+      this.ringPass(cam, cam.ring);
+      this.drawRing(cam.ring, cam.ringTime || 0);
+    } else this.ringT.fill(1e9);
 
     // ---------------- sprites ----------------
     const invDet = 1 / (plX * dirY - dirX * plY);
@@ -268,13 +371,180 @@ const Engine = {
     let tu = Math.floor(u * tw);
     if (tu < 0) tu = 0; else if (tu >= tw) tu = tw - 1;
     const l = level.light[li] * this.distLight(d) * 0.84 + flash;
-    const fr = l * level.tintR[li], fg = l * level.tintG[li], fb = l * level.tintB[li];
+    const ft = this.fogAt(d), k = 1 - ft;
+    const fog = level.sky[li] ? level.fogSky : level.fogDark;
+    const ar = fog[0] * ft, ag = fog[1] * ft, ab = fog[2] * ft;
+    const fr = l * level.tintR[li] * k, fg = l * level.tintG[li] * k, fb = l * level.tintB[li] * k;
+    const shd = ft > 0 ? shadeFog : shade;
     const vStep = th / (lb - lt);
     let v = (y0 + 0.5 - lt) * vStep;
     for (let y = y0; y < y1; y++, v += vStep) {
       let tv = v | 0;
       if (tv >= th) tv = th - 1;
-      this.buf[y * VW + x] = shade(td[tv * tw + tu], fr, fg, fb);
+      this.buf[y * VW + x] = shd(td[tv * tw + tu], fr, fg, fb, ar, ag, ab);
+    }
+  },
+
+  // Flats seen from above the walls, for the drop.
+  //
+  // Two planes are in view at once and both are below you: the roofs at z = WALL_H and
+  // the ground at z = 0. For a screen row p below the horizon they are at
+  //
+  //   roofs  (eyeZ - WALL_H) * PROJ / p      -- nearer, so it wins where it exists
+  //   ground  eyeZ           * PROJ / p
+  //
+  // both constant for the row. So a pixel steps the roof plane, and if the cell there
+  // is solid it draws the roof and stops; only over open ground does it go on to the
+  // second plane. Roof pixels therefore do *less* work than an ordinary ground pixel,
+  // and the whole thing costs one extra coordinate step and one array lookup -- not a
+  // doubled sample, which the flat cast cannot afford.
+  //
+  // Above the horizon there is only sky: you are over the rooftops.
+  flatsFromAbove(cam, level, horizon, eyeZ, flash, sky, camOut, r0x, r0y, r1x, r1y) {
+    const buf = this.buf, wtop = this.wtop, wbot = this.wbot;
+    const lw = level.w, lh = level.h;
+    const px = this.view.px, py = this.view.py;
+    const skyU = this.skyU;
+    const roofH = eyeZ - WALL_H;
+    // From twenty-odd units up the ground detail is already sub-pixel, and this is the
+    // one view where the flat cast is the entire frame. Two pixels at a time, doubled.
+    const step = eyeZ > WALL_H * 3 ? 2 : 1;
+
+    for (let y = 0; y < VH; y++) {
+      const row = y * VW;
+      const d = y + 0.5 - horizon;
+      if (d < 0.5) {
+        // looking up from above the roofs: sky, and nothing else
+        for (let x = 0; x < VW; x++) {
+          if (y >= wtop[x] && y < wbot[x]) continue;
+          let sv = sky.h - 1 - ((horizon - (y + 0.5)) | 0);
+          if (sv < 0) sv = 0;
+          buf[row + x] = sky.data[sv * sky.w + skyU[x]];
+        }
+        continue;
+      }
+      const groundDist = eyeZ * PROJ / d;
+      const roofDist = roofH * PROJ / d;
+      const gsx = groundDist * (r1x - r0x) / VW, gsy = groundDist * (r1y - r0y) / VW;
+      const rsx = roofDist * (r1x - r0x) / VW, rsy = roofDist * (r1y - r0y) / VW;
+      let gx = px + groundDist * r0x + gsx * 0.5, gy = py + groundDist * r0y + gsy * 0.5;
+      let rx = px + roofDist * r0x + rsx * 0.5, ry = py + roofDist * r0y + rsy * 0.5;
+      // one distance per plane per row, so lighting and fog are worked out twice, here
+      const gl = this.distLight(groundDist), rl = this.distLight(roofDist);
+      const gft = this.fogAt(groundDist), rft = this.fogAt(roofDist);
+      const gk = 1 - gft, rk = 1 - rft;
+      const fog = level.fogSky;
+      const gar = fog[0] * gft, gag = fog[1] * gft, gab = fog[2] * gft;
+      const rar = fog[0] * rft, rag = fog[1] * rft, rab = fog[2] * rft;
+
+      for (let x = 0; x < VW; x += step, gx += gsx * step, gy += gsy * step,
+        rx += rsx * step, ry += rsy * step) {
+        if (y >= wtop[x] && y < wbot[x]) continue;          // a wall face is already here
+        let c = 0;
+        const rcx = Math.floor(rx), rcy = Math.floor(ry);
+        const ri = (rcx >= 0 && rcy >= 0 && rcx < lw && rcy < lh) ? rcy * lw + rcx : -1;
+        if (ri >= 0 && level.solid[ri]) {
+          // a roof
+          const tex = level.roofTex[ri];
+          const tu = ((rx - rcx) * 64) & 63, tv = ((ry - rcy) * 64) & 63;
+          const l = level.light[ri] * rl + flash;
+          c = rft > 0
+            ? shadeFog(tex.data[tv * 64 + tu], l * rk, l * rk, l * rk, rar, rag, rab)
+            : shade(tex.data[tv * 64 + tu], l, l, l);
+        } else {
+          // through the gap between the roofs, to the ground
+          const gcx = Math.floor(gx), gcy = Math.floor(gy);
+          const gi = (gcx >= 0 && gcy >= 0 && gcx < lw && gcy < lh) ? gcy * lw + gcx : -1;
+          const tex = gi >= 0 ? level.floorTex[gi] : level.defFloor;
+          const tu = ((gx - gcx) * 64) & 63, tv = ((gy - gcy) * 64) & 63;
+          const l = (gi >= 0 ? level.light[gi] : 0.5) * gl + flash;
+          const tr = gi >= 0 ? level.tintR[gi] : 1, tg = gi >= 0 ? level.tintG[gi] : 1,
+            tb = gi >= 0 ? level.tintB[gi] : 1;
+          c = gft > 0
+            ? shadeFog(tex.data[tv * 64 + tu], l * tr * gk, l * tg * gk, l * tb * gk, gar, gag, gab)
+            : shade(tex.data[tv * 64 + tu], l * tr, l * tg, l * tb);
+        }
+        buf[row + x] = c;
+        if (step === 2 && x + 1 < VW && !(y >= wtop[x + 1] && y < wbot[x + 1])) {
+          buf[row + x + 1] = c;
+        }
+      }
+    }
+  },
+
+  // The battle royale ring, drawn as a curtain of static standing on the circle.
+  //
+  // There is no geometry to it: for each column we solve the camera ray against the
+  // circle. The DDA's `dist` is the ray parameter for the *unnormalised* camera ray
+  // (that is why PROJ/dist projects correctly), so solving with the same unnormalised
+  // (rx, ry) gives a number directly comparable with zbuf -- no perpendicular
+  // correction, no fish-eye. Inside the ring you see the far wall, so we want the
+  // exit; outside it, the near one.
+  //
+  // Must run after the walls and flats and before the sprites, so that it is behind
+  // anything nearer than it and in front of anything further.
+  ringPass(cam, ring) {
+    const v = this.view;
+    if (!v || !ring) return;
+    const ox = v.px - ring.cx, oy = v.py - ring.cy;
+    const cc = ox * ox + oy * oy - ring.r * ring.r;
+    const rt = this.ringT;
+    for (let x = 0; x < VW; x++) {
+      const camX = 2 * (x + 0.5) / VW - 1;
+      const rx = v.dirX + v.plX * camX, ry = v.dirY + v.plY * camX;
+      const A = rx * rx + ry * ry;
+      const B = ox * rx + oy * ry;            // half of the usual b
+      const disc = B * B - A * cc;
+      let t = 1e9;
+      if (disc > 0) {
+        const sq = Math.sqrt(disc);
+        const t0 = (-B - sq) / A, t1 = (-B + sq) / A;
+        t = t0 > 0.04 ? t0 : (t1 > 0.04 ? t1 : 1e9);
+      }
+      rt[x] = t < this.zbuf[x] ? t : 1e9;
+    }
+  },
+
+  // the blend itself; `time` only drives the shimmer
+  drawRing(ring, time) {
+    if (!ring) return;
+    const buf = this.buf, rt = this.ringT;
+    const v = this.view;
+    if (!v) return;
+    const ox = v.px - ring.cx, oy = v.py - ring.cy;
+    const horizon = this.horizon, eyeZ = this.eyeZ;
+    for (let x = 0; x < VW; x++) {
+      const t = rt[x];
+      if (t > 1e8) continue;
+      const top = horizon - (RING_H - eyeZ) * PROJ / t;
+      const bot = horizon + eyeZ * PROJ / t;
+      const y0 = top < 0 ? 0 : Math.ceil(top);
+      const y1 = bot > VH ? VH : Math.ceil(bot);
+      if (y1 <= y0) continue;
+      // where on the circle this column lands: gives the curtain a direction to drift in
+      const camX = 2 * (x + 0.5) / VW - 1;
+      const wx = ox + (v.dirX + v.plX * camX) * t, wy = oy + (v.dirY + v.plY * camX) * t;
+      const wa = Math.atan2(wy, wx);
+      let a = 0.30 + 0.17 * Math.sin(wa * 9 + time * 2.2);
+      if (t > 6) a *= 6 / t;                       // it fades out with distance
+      if (a <= 0.01) continue;
+      const ia = 1 - a, ar = RING_R * a, ag = RING_G * a, ab = RING_B * a;
+      // a dimmer band every few rows, so it reads as a sheet and not a wash
+      const ia2 = 1 - a * 0.45, ar2 = RING_R * a * 0.45, ag2 = RING_G * a * 0.45, ab2 = RING_B * a * 0.45;
+      for (let y = y0; y < y1; y++) {
+        const i = y * VW + x;
+        const c = buf[i];
+        const band = ((y + (time * 14 | 0)) & 7) < 4;
+        const f = band ? ia : ia2;
+        const br = band ? ar : ar2, bg = band ? ag : ag2, bb = band ? ab : ab2;
+        let r = (c & 255) * f + br;
+        let gg = ((c >>> 8) & 255) * f + bg;
+        let b = ((c >>> 16) & 255) * f + bb;
+        if (r > 255) r = 255;
+        if (gg > 255) gg = 255;
+        if (b > 255) b = 255;
+        buf[i] = 0xff000000 | ((b | 0) << 16) | ((gg | 0) << 8) | (r | 0);
+      }
     }
   },
 
@@ -298,22 +568,42 @@ const Engine = {
       l = (li >= 0 ? level.light[li] : 0.5) * this.distLight(ty) + flash;
       if (li >= 0) { tr = level.tintR[li]; tg = level.tintG[li]; tb = level.tintB[li]; }
     }
-    const fr = l * tr * (s.tintR || 1), fg = l * tg * (s.tintG || 1), fb = l * tb * (s.tintB || 1);
+    const ft = s.bright ? 0 : this.fogAt(ty), k = 1 - ft;
+    let ar = 0, ag = 0, ab = 0;
+    if (ft > 0) {
+      const sx2 = Math.floor(s.x), sy2 = Math.floor(s.y);
+      const li2 = (sx2 >= 0 && sy2 >= 0 && sx2 < level.w && sy2 < level.h)
+        ? sy2 * level.w + sx2 : -1;
+      const fog = (li2 >= 0 && level.sky[li2]) ? level.fogSky : level.fogDark;
+      ar = fog[0] * ft; ag = fog[1] * ft; ab = fog[2] * ft;
+    }
+    const fr = l * tr * (s.tintR || 1) * k, fg = l * tg * (s.tintG || 1) * k,
+      fb = l * tb * (s.tintB || 1) * k;
     const tw = tex.w, th = tex.h, td = tex.data;
     const uStep = tw / wpx, vStep = th / hpx;
     const flip = s.flip;
+    // if the ring's curtain is nearer than this sprite in a column, what shows there
+    // is mostly curtain: pre-mix the shade for those columns rather than per pixel
+    const rt = this.ringT;
+    const hazeK = 0.42;
+    const hr = fr * (1 - hazeK) + (RING_R / 255) * hazeK * 0.9;
+    const hg = fg * (1 - hazeK) + (RING_G / 255) * hazeK * 0.9;
+    const hb = fb * (1 - hazeK) + (RING_B / 255) * hazeK * 0.9;
     for (let x = x0; x < x1; x++) {
       if (ty >= zbuf[x]) continue;
+      const hazed = ty > rt[x];
+      const sr = hazed ? hr : fr, sg = hazed ? hg : fg, sb = hazed ? hb : fb;
       let tu = ((x + 0.5 - left) * uStep) | 0;
       if (tu >= tw) tu = tw - 1;
       if (flip) tu = tw - 1 - tu;
       let v = (y0 + 0.5 - top) * vStep;
+      const foggy = ft > 0 && !hazed;
       for (let y = y0; y < y1; y++, v += vStep) {
         let tv = v | 0;
         if (tv >= th) tv = th - 1;
         const c = td[tv * tw + tu];
         if ((c >>> 24) < 128) continue;
-        buf[y * VW + x] = shade(c, fr, fg, fb);
+        buf[y * VW + x] = foggy ? shadeFog(c, sr, sg, sb, ar, ag, ab) : shade(c, sr, sg, sb);
       }
     }
   },
@@ -355,8 +645,22 @@ const Engine = {
   },
 };
 
+// Just the light. Every caller that has no fog to add uses this, and it is exactly
+// what the renderer did before fog existed.
 function shade(c, fr, fg, fb) {
   let r = (c & 255) * fr, g = ((c >>> 8) & 255) * fg, b = ((c >>> 16) & 255) * fb;
+  if (r > 255) r = 255;
+  if (g > 255) g = 255;
+  if (b > 255) b = 255;
+  return 0xff000000 | ((b | 0) << 16) | ((g | 0) << 8) | (r | 0);
+}
+
+// The light, then the fog on top. Separate from shade() rather than shade() with
+// three more arguments: these are the two hottest functions in the renderer, and
+// giving one of them arguments that are sometimes numbers and sometimes undefined
+// costs more than the three adds do. Every argument here is always a number.
+function shadeFog(c, fr, fg, fb, ar, ag, ab) {
+  let r = (c & 255) * fr + ar, g = ((c >>> 8) & 255) * fg + ag, b = ((c >>> 16) & 255) * fb + ab;
   if (r > 255) r = 255;
   if (g > 255) g = 255;
   if (b > 255) b = 255;

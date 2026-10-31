@@ -20,8 +20,12 @@ ROOT = Path(__file__).resolve().parent.parent
 GAME = ROOT / "game"
 ASSETS = ROOT / "assets"
 
+# Assets bundle.py links instead of embedding (see its LINKED) are not in a build and
+# so cannot be recovered from one; they live in the repo under assets/.
+#
 # The inlined <script> blocks, in the order bundle.py emits them (EMBED is handled apart).
-MODULES = ["assets", "engine", "level", "audio", "settings", "game", "net", "hud", "main"]
+MODULES = ["assets", "collide", "weapons", "engine", "level", "maps/office", "maps/yard",
+           "maps/block", "mode", "audio", "settings", "game", "net", "hud", "main"]
 
 
 def main(src=ROOT / "63_ Office Hell.html"):
@@ -54,7 +58,9 @@ def main(src=ROOT / "63_ Office Hell.html"):
     for name, b in zip(MODULES, blocks):
         # group(1) already ends with the module's own newline; bundle.py adds the framing one
         src_text = b.group(1).replace(r"<\/script", "</script")
-        (GAME / "js" / f"{name}.js").write_text(src_text, encoding="utf-8")
+        out = GAME / "js" / f"{name}.js"
+        out.parent.mkdir(parents=True, exist_ok=True)   # js/maps/ and friends
+        out.write_text(src_text, encoding="utf-8")
         print(f"  game/js/{name}.js  {len(src_text):>7,} bytes")
 
     # markup only, with the <script src> tags restored
