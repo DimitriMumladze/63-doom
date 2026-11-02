@@ -2,11 +2,48 @@
 
 Open `63_ Office Hell.html` in a browser to play alone. It's live at http://31.97.38.206/officehell/.
 
-## Online co-op
+## Merge Conflict (team vs team)
 
-When the co-op server (`server.js`) runs on the same computer as the website, the title screen
-offers **PLAY ALONE** or **PLAY ONLINE**. It shows how many people are in the online game right now.
-Without the server, the game is single player as before.
+**MERGE CONFLICT** on the title screen: two teams, **MASTER** and **SANDBOX**, on a new map, "Burdzgla St.":
+two office buildings facing each other across the street. MASTER has the 63 office (open space, meeting room,
+boss office, the lounge with the dino wall, reception, kitchen, stairwell, the Red Corner). SANDBOX has the
+mirror image in server-room style. Each building is a grid of 3x3 rooms with its server at the far end.
+Corridors run along the top and bottom of both buildings and cross the street (the skybridge and the parking
+underpass). The front doors open onto the street, where the parked cars and a concrete barrier are the only cover.
+
+- **Steal the server:** grab the other team's server from their base and bring it to the glowing stand
+  in yours. You can only score while your own server is at home. If the carrier is fired, the server drops;
+  a teammate touching it sends it home (it also goes home by itself after 20 s). First to 3 captures, or
+  the most after 15 minutes.
+- **The lobby:** everyone starts on the character select screen and picks a team and a character. The
+  host (the first player in the room, or you offline) sets **BOTS: ON / OFF** and presses **START MATCH**
+  (Enter / B for bots, controller A / Y); everyone spawns together. After a match the scoreboard shows for
+  a few seconds, then it's back to the lobby.
+- **Bots** (when on) fill both teams up to four, and a bot leaves when a player joins mid-match. With bots
+  off, only players fight. Without the server it's you, offline, with or without seven bots.
+- **Pick a character** at the start and after every death:
+
+  | Character | Role | Weapon | Q ability | Boss form (F) |
+  |---|---|---|---|---|
+  | Nikoloz | Tank, 250 HP | Fists; hold right click (or V) to block: 70% less damage from the front, half speed | Shoulder Charge: a tackle that carries enemies along; into a wall = slam + stun | **Steroid Nikoloz**: 600 HP, huge punches, blocks; Q = Ground Pound, a leap that slams everyone around |
+  | Irakli | Assault | Shotgun | Double Espresso: faster for 5 s | **Grandmaster Irakli**: throws pawns, every 4th a rook; Q = Castling, swap places with a teammate |
+  | Dimitri | Demolition | Fireballs (splash) | Fire Drill: sets the floor on fire | **Big Dimitri**: rockets |
+  | Lasha | Flanker, fastest | Plasma | Chair Dash | **Lasha Hawking**: plasma that homes in, sees enemies through walls |
+  | Sandro | Support | Pistol | Redistribution: heals teammates near him | **Communist Sandro**: hammer and sickle, heals the whole team |
+  | M | Marksman | Rifle | Steady Aim: +50% damage for 6 s | **The Agamemnov**: spears, a fan of three every third throw |
+
+- **The boss meter** fills as you deal damage, fire people, steal, return and capture servers, and heal
+  (and slowly by itself). When it's full, **F** turns you into your boss form for 20 s.
+- **Controls** as in the campaign, plus **Q** or right click = ability (Nikoloz blocks with right click / V / LB), **F** (or E) = boss form,
+  **Tab** = scoreboard, **Esc** then **L** = leave the match. Controller: Y / RB ability, X boss form,
+  hold View for the scoreboard. Touch: SKILL and BOSS buttons.
+
+## Online co-op and Merge Conflict
+
+When the online server (`server.js`) runs on the same computer as the website, the title screen
+offers **PLAY ALONE**, **CO-OP** and **MERGE CONFLICT**, with how many people are in each right now.
+Co-op and Merge Conflict are separate rooms of up to 8 players each.
+Without the server, PLAY ALONE is the campaign as before and MERGE CONFLICT is you against bots.
 
 ### Running the server on the web server
 
@@ -43,7 +80,10 @@ Without the server, the game is single player as before.
    ```
 4. Upload the new `63_ Office Hell.html` to the website as before.
 
-Check: http://31.97.38.206:6363/ should say `63: Office Hell co-op server, 0 playing`.
+Check: http://31.97.38.206:6363/ should say `63: Office Hell co-op server, 0 playing, 0 in Merge Conflict`.
+
+After updating `server.js`, restart it: `sudo systemctl restart officehell`. The new page needs the new
+server (the old server doesn't know about the Merge Conflict room).
 
 The page looks for the server on port 6363 of the computer it was loaded from. To use a server
 somewhere else, add `?server=<address>:<port>` to the page address. The site is plain `http://`;
@@ -68,3 +108,11 @@ Windows may ask to let Node through the firewall: allow it on private networks.
 - Once the last boss is down, only the host can restart (`R`). A guest pressing `R` asks the host to restart.
 - Pausing doesn't stop the game for the others, and your player stays in the office while you're paused.
 - Up to 8 players. Another port: `PORT=7000 node server.js`. The page also needs `?server=<address>:7000`.
+
+### How Merge Conflict works online
+
+- The first player in is the host: their browser runs the bots, the servers, rockets, fire and pickups.
+  If the host leaves, the next player takes over and the match goes on.
+- Every player keeps their own health: whoever shoots decides what they hit and tells the others.
+- No friendly fire in Merge Conflict.
+- If the connection drops, the match goes on offline with bots.

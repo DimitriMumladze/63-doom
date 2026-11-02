@@ -1,9 +1,9 @@
-// Co-op server for 63: Office Hell. No dependencies: `node server.js` (Node 16 or newer).
+// Online server for 63: Office Hell (co-op and Merge Conflict). No dependencies: `node server.js` (Node 16 or newer).
 // The game page connects to it on port 6363 of the computer it was loaded from (see Net in the game):
 // on the computer that serves the page on the internet, or on a LAN, where this also serves the page
 // itself at http://<this computer's IP>:6363/.
-// Everyone who opens the page connects and sees how many are playing; PLAY ONLINE joins the game.
-// The first player in is the host and runs the world in their browser; this only passes messages on.
+// Everyone who opens the page connects and sees how many are playing; CO-OP or MERGE CONFLICT joins that room.
+// The first player in a room is its host and runs the world in their browser; this only passes messages on.
 'use strict';
 
 const http = require('http');
@@ -23,7 +23,7 @@ const server = http.createServer((req, res) => {
   // next to the game file this serves it too (LAN play); on a web server the page comes from there
   if (!fs.existsSync(GAME)) {
     res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8' });
-    res.end(`63: Office Hell co-op server, ${clients.size} playing.\n`);
+    res.end(`63: Office Hell co-op server, ${rooms.coop.clients.size} playing, ${rooms.mc.clients.size} in Merge Conflict.\n`);
     return;
   }
   log(`game page sent to ${String(req.socket.remoteAddress).replace(/^::ffff:/, '')}`);
@@ -32,19 +32,20 @@ const server = http.createServer((req, res) => {
 });
 
 // ----------------------------------------------------------------------
-// conns: every open page; clients: the ones in the game, id -> conn (the oldest is the host)
+// conns: every open page; each room's clients: the ones in that game, id -> conn (the oldest is the host).
+// coop = the campaign together, mc = Merge Conflict (team vs team)
 // ----------------------------------------------------------------------
 const conns = new Set();
-const clients = new Map();
-let nextId = 1, hostId = 0;
+const rooms = { coop: { name: 'co-op', clients: new Map(), hostId: 0 }, mc: { name: 'Merge Conflict', clients: new Map(), hostId: 0 } };
+let nextId = 1;
 
-function freeSlot() {
-  const used = new Set([...clients.values()].map(c => c.slot));
+function freeSlot(room) {
+  const used = new Set([...room.clients.values()].map(c => c.slot));
   for (let s = 1; ; s++) if (!used.has(s)) return s;
 }
 
 function accept(sock) {
-  const c = { id: 0, slot: 0, sock, seen: Date.now(), addr: String(sock.remoteAddress).replace(/^::ffff:/, '') };
+  const c = { id: 0, slot: 0, room: null, sock, seen: Date.now(), addr: String(sock.remoteAddress).replace(/^::ffff:/, '') };
   conns.add(c);
   send(c, lobby());
 
@@ -78,54 +79,60 @@ function receive(c, text) {
   let m;
   try { m = JSON.parse(text); } catch (e) { return; }
   if (!m || typeof m !== 'object') return;
-  if (!c.id) { if (m.t === 'join') join(c); return; }
+  if (!c.id) { if (m.t === 'join') join(c, rooms[m.room] ? m.room : 'coop'); return; }
   relay(c, m);
 }
 
-function join(c) {
-  if (clients.size >= MAX_PLAYERS) { send(c, { t: 'full' }); return; }
+function join(c, key) {
+  const room = rooms[key];
+  if (room.clients.size >= MAX_PLAYERS) { send(c, { t: 'full' }); return; }
   c.id = nextId++;
-  c.slot = freeSlot();
-  const others = [...clients.values()];
-  clients.set(c.id, c);
-  if (!hostId) hostId = c.id;
-  send(c, { t: 'welcome', id: c.id, slot: c.slot, host: hostId, players: others.map(o => ({ id: o.id, slot: o.slot })) });
-  broadcast({ t: 'join', id: c.id, slot: c.slot }, c.id);
-  log(`P${c.slot} joined from ${c.addr}${c.id === hostId ? ' (host)' : ''}, ${clients.size} playing`);
+  c.room = room;
+  c.slot = freeSlot(room);
+  const others = [...room.clients.values()];
+  room.clients.set(c.id, c);
+  if (!room.hostId) room.hostId = c.id;
+  send(c, { t: 'welcome', id: c.id, slot: c.slot, host: room.hostId, room: key, players: others.map(o => ({ id: o.id, slot: o.slot })) });
+  broadcast(room, { t: 'join', id: c.id, slot: c.slot }, c.id);
+  log(`${room.name}: P${c.slot} joined from ${c.addr}${c.id === room.hostId ? ' (host)' : ''}, ${room.clients.size} playing`);
   updateLobby();
 }
 
 function leave(c) {
   if (!conns.delete(c)) return;
   if (!c.id) return;
-  clients.delete(c.id);
-  broadcast({ t: 'leave', id: c.id });
-  if (hostId === c.id) {
-    const next = clients.values().next().value;
-    hostId = next ? next.id : 0;
-    if (next) broadcast({ t: 'host', id: hostId });
+  const room = c.room;
+  room.clients.delete(c.id);
+  broadcast(room, { t: 'leave', id: c.id });
+  if (room.hostId === c.id) {
+    const next = room.clients.values().next().value;
+    room.hostId = next ? next.id : 0;
+    if (next) broadcast(room, { t: 'host', id: room.hostId });
   }
-  log(`P${c.slot} left, ${clients.size} playing`);
+  log(`${room.name}: P${c.slot} left, ${room.clients.size} playing`);
   updateLobby();
 }
 
-// what the title screen shows before joining
-function lobby() { return { t: 'lobby', players: clients.size, max: MAX_PLAYERS }; }
+// what the title screen shows before joining (`players` is co-op, as before)
+function lobby() {
+  return { t: 'lobby', players: rooms.coop.clients.size, max: MAX_PLAYERS,
+    rooms: { coop: rooms.coop.clients.size, mc: rooms.mc.clients.size } };
+}
 function updateLobby() { const m = lobby(); for (const c of conns) if (!c.id) send(c, m); }
 
-// `to` = one player, otherwise all the others; the server stamps who sent it
+// `to` = one player, otherwise all the others in the room; the server stamps who sent it
 function relay(c, m) {
   m.from = c.id;
   const to = m.to;
   delete m.to;
-  if (to) { const d = clients.get(to); if (d) send(d, m); } else broadcast(m, c.id);
+  if (to) { const d = c.room.clients.get(to); if (d) send(d, m); } else broadcast(c.room, m, c.id);
 }
 
 function send(c, m) { if (!c.sock.destroyed) c.sock.write(frame(Buffer.from(JSON.stringify(m)), 1)); }
 
-function broadcast(m, except) {
+function broadcast(room, m, except) {
   const data = frame(Buffer.from(JSON.stringify(m)), 1);
-  for (const c of clients.values()) if (c.id !== except && !c.sock.destroyed) c.sock.write(data);
+  for (const c of room.clients.values()) if (c.id !== except && !c.sock.destroyed) c.sock.write(data);
 }
 
 // over the internet idle connections get cut: ping everyone, and drop the ones that stopped answering
