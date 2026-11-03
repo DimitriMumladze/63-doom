@@ -1,7 +1,8 @@
 // Online server for 63: Office Hell (co-op and Merge Conflict). No dependencies: `node server.js` (Node 16 or newer).
-// The game page connects to it on port 6363 of the computer it was loaded from (see Net in the game):
-// on the computer that serves the page on the internet, or on a LAN, where this also serves the page
-// itself at http://<this computer's IP>:6363/.
+// The game page connects to it at the address the page came from, or else on port 6363 of that computer
+// (see Net in the game): on the computer that serves the page on the internet, or on a LAN, where this also
+// serves the page itself at http://<this computer's IP>:6363/. Behind a Cloudflare tunnel (or any proxy that
+// passes WebSockets), point the tunnel here: the page and its connection (/ws) then share the one address.
 // Everyone who opens the page connects and sees how many are playing; CO-OP or MERGE CONFLICT joins that room.
 // The first player in a room is its host and runs the world in their browser; this only passes messages on.
 'use strict';

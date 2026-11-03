@@ -85,15 +85,32 @@ Check: http://31.97.38.206:6363/ should say `63: Office Hell co-op server, 0 pla
 After updating `server.js`, restart it: `sudo systemctl restart officehell`. The new page needs the new
 server (the old server doesn't know about the Merge Conflict room).
 
-The page looks for the server on port 6363 of the computer it was loaded from. To use a server
-somewhere else, add `?server=<address>:<port>` to the page address. The site is plain `http://`;
-if it ever moves to `https://`, put the co-op server behind the web server so it gets `wss://`.
+The page looks for the server at the address it was loaded from (`/ws`), then on port 6363 of that
+computer. To use a server somewhere else, add `?server=<address>:<port>` to the page address. The site
+is plain `http://`; if it ever moves to `https://`, have the web server pass `/ws` on to port 6363 so
+the page gets `wss://` at its own address.
 
 ### Playing on a LAN instead
 
 Put `server.js` next to the game file and run `node server.js`. Everyone on the network opens the
 address it prints, like `http://192.168.0.113:6363/`. Keep that window open while you play.
 Windows may ask to let Node through the firewall: allow it on private networks.
+
+### Behind a Cloudflare tunnel
+
+Run `server.js` next to the game file as on a LAN, and point the tunnel at it:
+
+```
+ingress:
+  - hostname: game.example.com
+    service: http://localhost:6363
+  - service: http_status:404
+```
+
+`server.js` serves the page and the game's connection (`/ws`) on the same port, so both go through
+the tunnel at `https://game.example.com/`. A tunnel only carries that one address: port 6363 of
+`game.example.com` doesn't exist. If the tunnel points at another web server instead,
+add a rule for the connection above the others (`path: ^/ws$`, `service: http://localhost:6363`).
 
 ### How co-op works
 

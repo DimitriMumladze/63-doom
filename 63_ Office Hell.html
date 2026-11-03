@@ -2377,9 +2377,9 @@ function viewOf(d, p) {
 
 </script>
 <script>
-// Online co-op. The page looks for the co-op server (server.js) on port NET_PORT of the computer it was
-// loaded from, or wherever `?server=host:port` in the page address says. If it's there, the title screen
-// offers PLAY ONLINE next to PLAY ALONE. The first one in is the host: their browser runs the coworkers,
+// Online co-op. The page looks for the co-op server (server.js) at the address it was loaded from, then on
+// port NET_PORT of that computer, or wherever `?server=host:port` in the page address says. If it's there,
+// the title screen offers PLAY ONLINE next to PLAY ALONE. The first one in is the host: their browser runs the coworkers,
 // doors, pickups and projectiles and sends the others snapshots of it 20 times a second. The others
 // move and aim on their own screen and send the host their shots, rockets, door presses and pickups.
 // Without a server (or opened as a file) the game is single player as before.
@@ -2413,21 +2413,28 @@ const Net = {
     return out;
   },
 
-  // ws://<page's computer>:6363/ws, or `?server=host:port` (or a full ws:// / wss:// address)
-  serverUrl() {
+  // where the server might be, in order: `?server=host:port` (or a full ws:// / wss:// address) if the page
+  // address says; otherwise the page's own address first (server.js served the page itself: on a LAN, or
+  // behind a Cloudflare tunnel or another proxy, where only the page's port gets through), then port NET_PORT
+  // of the same computer (the page comes from a web server and server.js runs next to it)
+  serverUrls() {
     let s = null;
     try { s = new URLSearchParams(location.search).get('server'); } catch (e) { /* old browser */ }
-    if (s) return /^wss?:\/\//.test(s) ? s : 'ws://' + s.replace(/\/+$/, '') + '/ws';
-    if (!location.hostname) return null;      // opened as a file
-    return (location.protocol === 'https:' ? 'wss://' : 'ws://') + location.hostname + ':' + NET_PORT + '/ws';
+    if (s) return [/^wss?:\/\//.test(s) ? s : 'ws://' + s.replace(/\/+$/, '') + '/ws'];
+    if (!location.hostname) return [];      // opened as a file
+    const ws = location.protocol === 'https:' ? 'wss://' : 'ws://';
+    const own = ws + location.host + '/ws', port = ws + location.hostname + ':' + NET_PORT + '/ws';
+    return own === port ? [own] : [own, port];
   },
 
-  // connects as a watcher (the title screen shows who's playing); join() goes into the game
-  connect() {
-    const url = this.serverUrl();
-    if (!url || this.ws) return;
-    let ws;
-    try { ws = new WebSocket(url); } catch (e) { return; }
+  // connects as a watcher (the title screen shows who's playing); join() goes into the game.
+  // at: which of serverUrls() to try; one that doesn't answer moves on to the next
+  connect(at = 0) {
+    const urls = this.serverUrls();
+    if (this.ws || at >= urls.length) return;
+    let ws, opened = false;
+    try { ws = new WebSocket(urls[at]); } catch (e) { this.connect(at + 1); return; }
+    ws.onopen = () => { opened = true; };
     ws.onmessage = ev => {
       let m;
       try { m = JSON.parse(ev.data); } catch (e) { return; }
@@ -2441,6 +2448,8 @@ const Net = {
         // Merge Conflict goes on offline, with bots
         if (Game.mode === 'mc' && wasGuest) MC.becomeHost();
       }
+      // nothing there: try the next address straight away
+      if (!opened && at + 1 < urls.length) { this.connect(at + 1); return; }
       // look again in a while, for as long as someone could still pick PLAY ONLINE
       setTimeout(() => { if (Main.state === 'title') this.connect(); }, leaving ? 300 : 5000);
     };
